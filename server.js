@@ -4,11 +4,12 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 
 const app = express();
+const Business = require('./models/Business');
 
 // middleware
 app.use(cors({
   origin: "http://localhost:8081",
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true
 }));
 app.use(express.json());
@@ -26,6 +27,59 @@ app.get("/", (req, res) => {
 // routes
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/cities', require('./routes/cityRoutes')); // will create later
+app.use("/api/business", require('./routes/business'));
+
+// // Create a new Business when serviceType is selected
+// app.post("/api/business", async (req, res) => {
+//   try {
+//     const { userId, serviceType } = req.body;
+
+//     if (!userId || !serviceType) {
+//       return res.status(400).json({ message: "userId and serviceType are required" });
+//     }
+
+//     // Create Business doc with only serviceType + userId initially
+//     const business = new Business({
+//       userId,
+//       serviceType,
+//       // rest fields empty initially
+//       name: "",
+//       address: "",
+//       phone: "",
+//       services: []
+//     });
+
+//     await business.save();
+//     res.status(201).json(business);
+
+//   } catch (error) {
+//     console.error(error);
+//     res.status(500).json({ message: "Error creating business" });
+//   }
+// });
+
+
+// PUT update business
+app.put("/api/business/update/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updated = await Business.findByIdAndUpdate(
+      id,
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: "Business not found" });
+    }
+
+    res.json(updated);
+  } catch (err) {
+    console.error("Error updating business:", err);
+    res.status(500).json({ error: "Server error", details: err.message });
+  }
+});
+
 
 // start server
 const PORT = process.env.PORT || 4000;

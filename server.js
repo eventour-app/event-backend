@@ -6,6 +6,9 @@ const mongoose = require('mongoose');
 const app = express();
 const Business = require('./models/Business');
 
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage() }); // keep in memory before saving to DB
+
 // middleware
 app.use(cors({
   origin: "http://localhost:8081",
@@ -60,25 +63,45 @@ app.use("/api/business", require('./routes/business'));
 
 
 // PUT update business
-app.put("/api/business/update/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updated = await Business.findByIdAndUpdate(
-      id,
-      { $set: req.body },
-      { new: true, runValidators: true }
-    );
+app.put(
+  "/api/business/update/:id",
+  upload.fields([
+    { name: "govtId", maxCount: 1 },
+    { name: "registrationProof", maxCount: 1 },
+    { name: "cancelledCheque", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const { bankAccount, ifscCode } = req.body;
 
-    if (!updated) {
-      return res.status(404).json({ error: "Business not found" });
+      // build update object dynamically
+      const updateData = {};
+      if (bankAccount) updateData.bankAccount = bankAccount;
+      if (ifscCode) updateData.ifscCode = ifscCode;
+
+      if (req.files.govtId) {
+        updateData.govtId = req.files.govtId[0].buffer; // requires schema field = Buffer
+      }
+      if (req.files.registrationProof) {
+        updateData.registrationProof = req.files.registrationProof[0].buffer;
+      }
+      if (req.files.cancelledCheque) {
+        updateData.cancelledCheque = req.files.cancelledCheque[0].buffer;
+      }
+
+      const updatedBusiness = await Business.findByIdAndUpdate(
+        req.params.id,
+        { $set: updateData },
+        { new: true, runValidators: true }
+      );
+
+      res.json(updatedBusiness);
+    } catch (err) {
+      console.error("Error updating business:", err);
+      res.status(500).json({ error: err.message });
     }
-
-    res.json(updated);
-  } catch (err) {
-    console.error("Error updating business:", err);
-    res.status(500).json({ error: "Server error", details: err.message });
   }
-});
+);
 
 
 // start server

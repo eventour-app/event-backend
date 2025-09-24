@@ -4,25 +4,38 @@
   "main": "index.js",
   "scripts": {
     "start": "expo start",
+    "server": "node server.js",
+    "migrate:business": "node scripts/migrate_business.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.1",
+    "dotenv": "^17.2.2",
     "expo": "~53.0.20",
     "expo-status-bar": "~2.2.3",
-    "express": "^5.1.0",
+    "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.18.0",
+    "mongoose": "^8.18.1",
     "multer": "^2.0.2",
     "react": "19.0.0",
-    "react-native": "0.79.5"
+    "react-native": "0.79.5",
+    "sharp": "^0.34.4"
   },
   "devDependencies": {
-    "@babel/core": "^7.20.0"
+    "@babel/core": "^7.20.0",
+    "nodemon": "^3.1.10"
   },
-  "private": true
+  "private": true,
+  "description": "Express + MongoDB backend that powers auth and business endpoints for the Event Vendor app (Expo/React Native).",
+  "repository": {
+    "type": "git",
+    "url": "git@github-raidamini:spriya0711/event-vendor-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

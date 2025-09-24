@@ -15,7 +15,15 @@ const businessSchema = new mongoose.Schema({
   whatsapp: { type: String },
   location: {
     address: { type: String },
-    gps: { type: String }, // you can store coordinates like "lat,long"
+    street: { type: String },
+    houseNo: { type: String },
+    plotNo: { type: String },
+    area: { type: String },
+    landmark: { type: String },
+    pincode: { type: String },
+    state: { type: String },
+    // GPS coordinates string "lat,long"
+    gps: { type: String },
   },
   workingDays: [{ type: String }], // e.g. ["Mon","Tue","Wed"]
   openingTime: { type: String },
@@ -24,7 +32,12 @@ const businessSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   bankAccount: { type: String },
   ifscCode: { type: String },
-  // 👇 New field: nested array of services
+ 
+  status: { type: String, enum: ['online', 'offline'], default: 'offline', index: true },
+  verificationStatus: { type: String, enum: ['draft', 'verified'], default: 'draft', index: true },
+  partnerContractAccepted: { type: Boolean, default: false },
+  isRegisteredBusiness: { type: Boolean, default: false },
+  serviceDetail: { type: String },
   services: [
     {
       serviceName: { type: String, required: true },
@@ -33,6 +46,27 @@ const businessSchema = new mongoose.Schema({
       images: [String],           // array of image URLs
     }
   ]
+});
+
+businessSchema.add({
+  logo: {
+    data: Buffer,
+    contentType: String,
+    sizeKb: Number,
+    width: Number,
+    height: Number,
+  },
+    logoUrl: String,
+  govtId: Buffer,
+  registrationProof: Buffer,
+  cancelledCheque: Buffer,
+    govtIdUrl: String,
+    registrationProofUrl: String,
+    cancelledChequeUrl: String,
+  ownerPhoto: Buffer,
+  previewPhoto: Buffer,
+    ownerPhotoUrl: String,
+    previewPhotoUrl: String,
 });
 
 module.exports = mongoose.model("Business", businessSchema);

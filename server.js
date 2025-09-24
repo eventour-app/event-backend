@@ -2,35 +2,82 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const Business = require('./models/Business');
 
 const multer = require("multer");
-const upload = multer({ storage: multer.memoryStorage() }); // keep in memory before saving to DB
+const path = require('path');
+const fs = require('fs');
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const ts = Date.now();
+    cb(null, `${ts}-${safe}`);
+  }
+});
+const upload = multer({ storage });
 
 // middleware
 app.use(cors({
-  origin: "http://localhost:8081",
+  origin: ["http://localhost:8081", "http://localhost:8082"],
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true
 }));
-app.use(express.json());
+
+const BODY_LIMIT = process.env.BODY_LIMIT || '50mb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 
 // connect MongoDB
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB Connected"))
   .catch(err => console.error("MongoDB connection error:", err));
 
-// test route
+app.use('/uploads', express.static(uploadsDir));
+
 app.get("/", (req, res) => {
   res.send("Backend is working 🎉");
 });
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// routes
+const isPublicRoute = (req) => {
+  const pub = [
+    { method: 'POST', path: '/api/auth/login' },
+    { method: 'POST', path: '/api/auth/register' },
+    { method: 'POST', path: '/api/customer/register' },
+    { method: 'POST', path: '/api/customer/auth/login' },
+  ];
+  return pub.some(r => r.method === req.method && req.path === r.path);
+};
+
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  if (isPublicRoute(req)) return next();
+
+  const hdr = req.headers.authorization || '';
+  const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Missing Bearer token' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.auth = decoded;
+    req.userId = decoded.sub || decoded.id;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ message: 'Invalid/expired token' });
+  }
+});
+
+
 app.use('/api/auth', require('./routes/authRoutes'));
-app.use('/api/cities', require('./routes/cityRoutes')); // will create later
+app.use('/api/cities', require('./routes/cityRoutes'));
 app.use("/api/business", require('./routes/business'));
+app.use('/api/customer', require('./routes/customer'));
+app.use('/api/customer/auth', require('./routes/customerAuth'));
 
 // // Create a new Business when serviceType is selected
 // app.post("/api/business", async (req, res) => {
@@ -62,47 +109,20 @@ app.use("/api/business", require('./routes/business'));
 // });
 
 
-// PUT update business
-app.put(
-  "/api/business/update/:id",
-  upload.fields([
-    { name: "govtId", maxCount: 1 },
-    { name: "registrationProof", maxCount: 1 },
-    { name: "cancelledCheque", maxCount: 1 },
-  ]),
-  async (req, res) => {
-    try {
-      const { bankAccount, ifscCode } = req.body;
 
-      // build update object dynamically
-      const updateData = {};
-      if (bankAccount) updateData.bankAccount = bankAccount;
-      if (ifscCode) updateData.ifscCode = ifscCode;
+app.use((req, res, next) => {
+  res.status(404).json({ message: 'Route not found' });
+});
 
-      if (req.files.govtId) {
-        updateData.govtId = req.files.govtId[0].buffer; // requires schema field = Buffer
-      }
-      if (req.files.registrationProof) {
-        updateData.registrationProof = req.files.registrationProof[0].buffer;
-      }
-      if (req.files.cancelledCheque) {
-        updateData.cancelledCheque = req.files.cancelledCheque[0].buffer;
-      }
-
-      const updatedBusiness = await Business.findByIdAndUpdate(
-        req.params.id,
-        { $set: updateData },
-        { new: true, runValidators: true }
-      );
-
-      res.json(updatedBusiness);
-    } catch (err) {
-      console.error("Error updating business:", err);
-      res.status(500).json({ error: err.message });
-    }
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    return res.status(413).json({
+      message: 'Request entity too large. Reduce payload size or increase BODY_LIMIT.',
+    });
   }
-);
-
+  res.status(err.status || 500).json({ message: err.message || 'Internal Server Error' });
+});
 
 // start server
 const PORT = process.env.PORT || 4000;

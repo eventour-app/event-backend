@@ -1,0 +1,43 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "install-sharp",
+			"type": "shell",
+			"command": "npm install sharp",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "run-server",
+			"type": "shell",
+			"command": "npm run server",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
+		},
+		{
+			"label": "run-server",
+			"type": "shell",
+			"command": "npm run server",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
+		},
+		{
+			"label": "run-server",
+			"type": "shell",
+			"command": "npm run server",
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}

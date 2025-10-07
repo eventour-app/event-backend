@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Business = require("../models/Business");
+const mongoose = require('mongoose');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -64,6 +65,7 @@ router.post('/onboard', async (req, res) => {
       documents = {},
       photos = {},
       services = [],
+      packages: rawPackages = [],
       logo,
     } = req.body || {};
 
@@ -76,7 +78,13 @@ router.post('/onboard', async (req, res) => {
       business = await Business.findById(businessId);
       if (!business) return res.status(404).json({ message: 'Business not found' });
     } else {
-      business = new Business({ userId, serviceType, verificationStatus: 'draft' });
+      // New listings should be visible to user app immediately
+      business = new Business({
+        userId,
+        serviceType,
+        verificationStatus: 'verified',
+        status: 'online',
+      });
     }
 
     const basic = {};
@@ -140,11 +148,13 @@ router.post('/onboard', async (req, res) => {
       }
     }
 
+    // Normalize services and pre-assign _id so packages can reference them within the same request
+    let normalizedServices = [];
     if (Array.isArray(services) && services.length) {
-      const normalized = [];
       for (const s of services) {
         if (!s || !s.serviceName || !s.price) continue;
         const item = {
+          _id: new mongoose.Types.ObjectId(),
           serviceName: s.serviceName,
           price: s.price,
           discount: s.discount,
@@ -158,9 +168,75 @@ router.post('/onboard', async (req, res) => {
             item.images.push(toDataUrl(processed));
           }
         }
-        normalized.push(item);
+        normalizedServices.push(item);
       }
-      if (normalized.length) business.services = normalized;
+      if (normalizedServices.length) business.services = normalizedServices;
+    }
+
+    // Packages: allow referencing existing services via selectedServiceIds, or newly provided services via selectedServiceIndices
+    let packages = [];
+    try {
+      const pk = typeof rawPackages === 'string' ? JSON.parse(rawPackages) : rawPackages;
+      if (Array.isArray(pk)) packages = pk;
+    } catch {
+      return res.status(400).json({ message: 'packages must be an array (or JSON stringified array)' });
+    }
+
+    // If this is a create (no businessId), enforce at least one service or package
+    if (!businessId) {
+      const hasServices = Array.isArray(normalizedServices) && normalizedServices.length > 0;
+      const hasPackages = Array.isArray(packages) && packages.length > 0;
+      if (!hasServices && !hasPackages) {
+        return res.status(400).json({ message: 'At least one service or one package is required to create a listing' });
+      }
+    }
+
+    if (Array.isArray(packages) && packages.length) {
+      // Build a map of serviceId -> service combining existing (for updates) and new services from this request
+      const serviceMap = new Map();
+      // existing services if updating
+      if (business && Array.isArray(business.services)) {
+        for (const s of business.services) serviceMap.set(String(s._id), s);
+      }
+      // newly provided services
+      for (const s of normalizedServices) serviceMap.set(String(s._id), s);
+
+      const out = [];
+      for (const p of packages) {
+        if (!p || !p.name || !p.price) continue;
+        let selectedIds = [];
+        if (Array.isArray(p.selectedServiceIds) && p.selectedServiceIds.length) {
+          selectedIds = p.selectedServiceIds.map(String);
+        } else if (Array.isArray(p.selectedServiceIndices) && p.selectedServiceIndices.length) {
+          // Map indices to ids from normalizedServices only
+          for (const idx of p.selectedServiceIndices) {
+            const i = Number(idx);
+            if (Number.isInteger(i) && i >= 0 && i < normalizedServices.length) {
+              selectedIds.push(String(normalizedServices[i]._id));
+            }
+          }
+        }
+        // Validate all ids exist in our map
+        const invalid = selectedIds.filter(id => !serviceMap.has(String(id)));
+        if (invalid.length) {
+          return res.status(400).json({ message: 'One or more selectedServiceIds do not exist on this listing', invalid });
+        }
+        if (selectedIds.length === 0) continue; // skip empty package
+
+        out.push({
+          name: String(p.name).trim(),
+          selectedServiceIds: selectedIds,
+          price: String(p.price),
+          description: p.description ? String(p.description) : undefined,
+          createdAt: new Date(),
+          active: p.active !== undefined ? !!p.active : true,
+        });
+      }
+      if (out.length) {
+        business.packages = business.packages || [];
+        // For onboarding, append packages to any existing ones
+        business.packages.push(...out);
+      }
     }
 
     const saved = await business.save();
@@ -195,11 +271,15 @@ router.post('/onboard-multipart',
       // Parse JSON fields
       let businessInfo = {};
       let services = [];
+      let packages = [];
       if (req.body.businessInfo) {
         try { businessInfo = JSON.parse(req.body.businessInfo); } catch { return res.status(400).json({ message: 'businessInfo must be valid JSON' }); }
       }
       if (req.body.services) {
         try { services = JSON.parse(req.body.services); } catch { return res.status(400).json({ message: 'services must be valid JSON' }); }
+      }
+      if (req.body.packages) {
+        try { packages = JSON.parse(req.body.packages); } catch { return res.status(400).json({ message: 'packages must be valid JSON' }); }
       }
 
       // Find or create business
@@ -208,8 +288,13 @@ router.post('/onboard-multipart',
         business = await Business.findById(businessId);
         if (!business) return res.status(404).json({ message: 'Business not found' });
       } else {
-        // New listings default to draft verificationStatus
-        business = new Business({ userId, serviceType, verificationStatus: 'draft' });
+        // Make new listings public by default so they show in the user app immediately
+        business = new Business({
+          userId,
+          serviceType,
+          verificationStatus: 'verified',
+          status: 'online',
+        });
       }
 
       // Assign core info
@@ -268,12 +353,13 @@ router.post('/onboard-multipart',
       }
 
     
+      // Normalize services with pre-assigned _id for package referencing
+      let normalizedServices = [];
       if (Array.isArray(services) && services.length) {
-        const normalized = [];
         for (let i = 0; i < services.length; i++) {
           const s = services[i];
           if (!s || !s.serviceName || !s.price) continue;
-          const item = { serviceName: s.serviceName, price: s.price, discount: s.discount, images: [] };
+          const item = { _id: new mongoose.Types.ObjectId(), serviceName: s.serviceName, price: s.price, discount: s.discount, images: [] };
           // If client provided imageIndices mapping, use it; else if files.serviceImages exist, attach all
           if (Array.isArray(s.imageIndices) && files.serviceImages?.length) {
             for (const idx of s.imageIndices) {
@@ -288,12 +374,63 @@ router.post('/onboard-multipart',
               item.images.push(fileUrl(f));
             }
           }
-          normalized.push(item);
+          normalizedServices.push(item);
         }
-        if (normalized.length) business.services = normalized;
+        if (normalizedServices.length) business.services = normalizedServices;
       }
 
-  const saved = await business.save();
+      // If this is create, ensure at least one service or package
+      if (!businessId) {
+        const hasServices = Array.isArray(normalizedServices) && normalizedServices.length > 0;
+        const hasPackages = Array.isArray(packages) && packages.length > 0;
+        if (!hasServices && !hasPackages) {
+          return res.status(400).json({ message: 'At least one service or one package is required to create a listing' });
+        }
+      }
+
+      // Handle packages referencing services
+      if (Array.isArray(packages) && packages.length) {
+        const serviceMap = new Map();
+        if (business && Array.isArray(business.services)) {
+          for (const s of business.services) serviceMap.set(String(s._id), s);
+        }
+        for (const s of normalizedServices) serviceMap.set(String(s._id), s);
+
+        const out = [];
+        for (const p of packages) {
+          if (!p || !p.name || !p.price) continue;
+          let selectedIds = [];
+          if (Array.isArray(p.selectedServiceIds) && p.selectedServiceIds.length) {
+            selectedIds = p.selectedServiceIds.map(String);
+          } else if (Array.isArray(p.selectedServiceIndices) && p.selectedServiceIndices.length) {
+            for (const idx of p.selectedServiceIndices) {
+              const i = Number(idx);
+              if (Number.isInteger(i) && i >= 0 && i < normalizedServices.length) {
+                selectedIds.push(String(normalizedServices[i]._id));
+              }
+            }
+          }
+          const invalid = selectedIds.filter(id => !serviceMap.has(String(id)));
+          if (invalid.length) {
+            return res.status(400).json({ message: 'One or more selectedServiceIds do not exist on this listing', invalid });
+          }
+          if (selectedIds.length === 0) continue;
+          out.push({
+            name: String(p.name).trim(),
+            selectedServiceIds: selectedIds,
+            price: String(p.price),
+            description: p.description ? String(p.description) : undefined,
+            createdAt: new Date(),
+            active: p.active !== undefined ? !!p.active : true,
+          });
+        }
+        if (out.length) {
+          business.packages = business.packages || [];
+          business.packages.push(...out);
+        }
+      }
+
+      const saved = await business.save();
       res.status(businessId ? 200 : 201).json({ message: 'Onboarding data saved (multipart)', business: saved });
     } catch (err) {
       console.error('onboard-multipart error:', err);
@@ -301,6 +438,123 @@ router.post('/onboard-multipart',
     }
   }
 );
+
+
+  // ---------------- Packages Endpoints ----------------
+  // Create a package for a business (listing)
+  // POST /api/business/:businessId/packages
+  // body: { name: string, selectedServiceIds: string[], price: string, description?: string }
+  router.post('/:businessId/packages', async (req, res) => {
+    try {
+      const { businessId } = req.params;
+      const { name, selectedServiceIds, price, description } = req.body || {};
+
+      if (!name || !price || !Array.isArray(selectedServiceIds) || selectedServiceIds.length === 0) {
+        return res.status(400).json({ message: 'name, price and selectedServiceIds[] are required' });
+      }
+
+      const business = await Business.findById(businessId);
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+
+      // Validate that all selected service IDs belong to this business.services
+      const serviceIdSet = new Set(business.services.map(s => String(s._id)));
+      const invalid = selectedServiceIds.filter(id => !serviceIdSet.has(String(id)));
+      if (invalid.length) {
+        return res.status(400).json({ message: 'One or more selectedServiceIds do not exist on this listing', invalid });
+      }
+
+      const pkg = {
+        name: String(name).trim(),
+        selectedServiceIds: selectedServiceIds.map(String),
+        price: String(price),
+        description: description ? String(description) : undefined,
+        createdAt: new Date(),
+        active: true,
+      };
+
+      business.packages = business.packages || [];
+      business.packages.push(pkg);
+      await business.save();
+
+      // Return the created package (last item)
+      const created = business.packages[business.packages.length - 1];
+      res.status(201).json({ message: 'Package created', package: created });
+    } catch (err) {
+      console.error('create package error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // List packages for a business with selected service details expanded
+  // GET /api/business/:businessId/packages
+  router.get('/:businessId/packages', async (req, res) => {
+    try {
+      const { businessId } = req.params;
+      const business = await Business.findById(businessId).lean();
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+
+      const servicesById = new Map((business.services || []).map(s => [String(s._id), s]));
+      const packages = (business.packages || []).map(p => ({
+        ...p,
+        selectedServices: (p.selectedServiceIds || []).map(id => servicesById.get(String(id))).filter(Boolean),
+      }));
+
+      res.json({ packages });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+// ---------------- Add Services to an existing listing ----------------
+// POST /api/business/:businessId/services
+// body: { services: [{ serviceName, price, discount?, images?: string[] (data URLs or URLs) }] }
+router.post('/:businessId/services', async (req, res) => {
+  try {
+    const { businessId } = req.params;
+    const { services = [] } = req.body || {};
+    if (!Array.isArray(services) || services.length === 0) {
+      return res.status(400).json({ message: 'services[] is required with at least one item' });
+    }
+    const business = await Business.findById(businessId);
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+
+    const toAdd = [];
+    for (const s of services) {
+      if (!s || !s.serviceName || !s.price) continue;
+      const item = {
+        _id: new mongoose.Types.ObjectId(),
+        serviceName: String(s.serviceName),
+        price: String(s.price),
+        discount: s.discount ? String(s.discount) : undefined,
+        images: [],
+      };
+      if (Array.isArray(s.images) && s.images.length) {
+        for (const img of s.images) {
+          if (typeof img === 'string' && img.startsWith('data:')) {
+            const p = parseDataUrl(img);
+            if (!p) continue;
+            const processed = await processImage(p.buffer, 'service');
+            item.images.push(toDataUrl(processed));
+          } else if (typeof img === 'string') {
+            // Accept plain URLs as-is
+            item.images.push(img);
+          }
+        }
+      }
+      toAdd.push(item);
+    }
+    if (!toAdd.length) {
+      return res.status(400).json({ message: 'No valid services provided' });
+    }
+    business.services = business.services || [];
+    business.services.push(...toAdd);
+    await business.save();
+    res.status(201).json({ message: 'Services added', services: toAdd });
+  } catch (err) {
+    console.error('add services error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 router.put('/:businessId/status', async (req, res) => {
@@ -356,6 +610,41 @@ router.put('/:businessId/contract', async (req, res) => {
     res.json({ message: 'Contract flag updated', business: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------- Listing Details (vendor-side) ----------------
+// GET /api/business/:businessId
+// Returns full listing with services and packages, expanding selected services on packages
+router.get('/:businessId', async (req, res, next) => {
+  // Avoid clashing with other defined, more specific routes by ensuring this runs before the legacy catch-all
+  try {
+    const { businessId } = req.params;
+    const projection = {
+      logo: 0,
+      govtId: 0,
+      registrationProof: 0,
+      cancelledCheque: 0,
+      ownerPhoto: 0,
+      previewPhoto: 0,
+      __v: 0,
+    };
+    const doc = await Business.findById(businessId).select(projection).lean();
+    if (!doc) return res.status(404).json({ message: 'Listing not found' });
+    const servicesById = new Map((doc.services || []).map(s => [String(s._id), s]));
+    const packages = (doc.packages || []).map(p => ({
+      _id: p._id,
+      name: p.name,
+      price: p.price,
+      description: p.description,
+      createdAt: p.createdAt,
+      active: p.active,
+      selectedServiceIds: p.selectedServiceIds,
+      selectedServices: (p.selectedServiceIds || []).map(id => servicesById.get(String(id))).filter(Boolean),
+    }));
+    return res.json({ ...doc, packages });
+  } catch (err) {
+    return next(err);
   }
 });
 

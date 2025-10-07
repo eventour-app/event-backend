@@ -48,6 +48,22 @@ const businessSchema = new mongoose.Schema({
   ]
 });
 
+// Packages associated with a listing (business)
+// Each package references selected service subdocument IDs from `services`
+businessSchema.add({
+  packages: [
+    new mongoose.Schema({
+      name: { type: String, required: true, trim: true },
+      // references to business.services subdocument _ids
+      selectedServiceIds: [{ type: mongoose.Schema.Types.ObjectId, required: true }],
+      price: { type: String, required: true },
+      description: { type: String },
+      createdAt: { type: Date, default: Date.now },
+      active: { type: Boolean, default: true },
+    }, { _id: true, id: false })
+  ]
+});
+
 businessSchema.add({
   logo: {
     data: Buffer,

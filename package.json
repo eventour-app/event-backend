@@ -11,16 +11,20 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.2",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "expo": "~53.0.20",
     "expo-status-bar": "~2.2.3",
     "express": "^4.19.2",
+    "firebase-admin": "^13.5.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
     "multer": "^2.0.2",
+    "nodemailer": "^7.0.7",
     "react": "19.0.0",
     "react-native": "0.79.5",
     "sharp": "^0.34.4"

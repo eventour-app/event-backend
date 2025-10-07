@@ -51,8 +51,16 @@ const isPublicRoute = (req) => {
     { method: 'POST', path: '/api/auth/register' },
     { method: 'POST', path: '/api/customer/register' },
     { method: 'POST', path: '/api/customer/auth/login' },
+    { method: 'POST', path: '/api/auth/send-otp' },
+    { method: 'POST', path: '/api/auth/verify-otp' },
+    { method: 'POST', path: '/api/customer/auth/send-otp' },
+    { method: 'POST', path: '/api/customer/auth/verify-otp' },
+    { method: 'POST', path: '/api/firebase/login' },
   ];
-  return pub.some(r => r.method === req.method && req.path === r.path);
+ 
+  if (pub.some(r => r.method === req.method && req.path === r.path)) return true;
+  if (req.method === 'GET' && req.path.startsWith('/api/customer/listings')) return true;
+  return false;
 };
 
 app.use((req, res, next) => {
@@ -78,37 +86,8 @@ app.use('/api/cities', require('./routes/cityRoutes'));
 app.use("/api/business", require('./routes/business'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/customer/auth', require('./routes/customerAuth'));
-
-// // Create a new Business when serviceType is selected
-// app.post("/api/business", async (req, res) => {
-//   try {
-//     const { userId, serviceType } = req.body;
-
-//     if (!userId || !serviceType) {
-//       return res.status(400).json({ message: "userId and serviceType are required" });
-//     }
-
-//     // Create Business doc with only serviceType + userId initially
-//     const business = new Business({
-//       userId,
-//       serviceType,
-//       // rest fields empty initially
-//       name: "",
-//       address: "",
-//       phone: "",
-//       services: []
-//     });
-
-//     await business.save();
-//     res.status(201).json(business);
-
-//   } catch (error) {
-//     console.error(error);
-//     res.status(500).json({ message: "Error creating business" });
-//   }
-// });
-
-
+app.use('/api/firebase', require('./routes/firebaseAuth'));
+app.use('/api/users', require('./routes/users'));
 
 app.use((req, res, next) => {
   res.status(404).json({ message: 'Route not found' });

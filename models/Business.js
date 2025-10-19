@@ -38,6 +38,11 @@ const businessSchema = new mongoose.Schema({
   partnerContractAccepted: { type: Boolean, default: false },
   isRegisteredBusiness: { type: Boolean, default: false },
   serviceDetail: { type: String },
+  // Timed offline support
+  // When status === 'offline' and offlineUntil is a future date, listing auto-restores to online at that time
+  // When status === 'offline' and offlineUntil is null, vendor must manually toggle back online
+  offlineSince: { type: Date, default: null },
+  offlineUntil: { type: Date, default: null, index: true },
   services: [
     {
       serviceName: { type: String, required: true },

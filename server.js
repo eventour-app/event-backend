@@ -107,6 +107,26 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`));
 
+// Auto-restore job: every minute, set timed-offline listings back online when due
+const TICK_MS = 60 * 1000;
+setInterval(async () => {
+  try {
+    // Find businesses currently offline where offlineUntil has passed
+    const now = new Date();
+    const toRestore = await Business.find({ status: 'offline', offlineUntil: { $ne: null, $lte: now } }).select('_id');
+    if (toRestore.length) {
+      const ids = toRestore.map(b => b._id);
+      await Business.updateMany(
+        { _id: { $in: ids } },
+        { $set: { status: 'online', offlineSince: null, offlineUntil: null } }
+      );
+      console.log(`Auto-restored ${ids.length} listing(s) to online`);
+    }
+  } catch (e) {
+    console.error('Auto-restore job error:', e);
+  }
+}, TICK_MS);
+
 
 // require('dotenv').config();
 // const express = require('express');

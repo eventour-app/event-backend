@@ -557,20 +557,80 @@ router.post('/:businessId/services', async (req, res) => {
 });
 
 
+// Update online/offline status with optional scheduling support
+// PUT /api/business/:businessId/status
+// Body supports:
+// - { status: 'online' }
+//   => clears offlineSince/offlineUntil
+// - { status: 'offline', mode: 'preset', preset: '1h'|'2h'|'5h' }
+// - { status: 'offline', mode: 'custom', durationMinutes?: number, durationHours?: number }
+// - { status: 'offline', mode: 'until-back' } // manual toggle back online
 router.put('/:businessId/status', async (req, res) => {
   try {
     const { businessId } = req.params;
-    const { status } = req.body || {};
+    const { status, mode, preset, durationMinutes, durationHours, until } = req.body || {};
     if (!['online', 'offline'].includes(status)) {
       return res.status(400).json({ message: 'status must be online or offline' });
     }
+
+    const update = { status };
+    if (status === 'online') {
+      update.offlineSince = null;
+      update.offlineUntil = null;
+    } else {
+      // status === 'offline'
+      update.offlineSince = new Date();
+      let untilDate = null;
+      if (mode === 'preset') {
+        const map = { '1h': 60, '2h': 120, '5h': 300 };
+        const mins = map[preset];
+        if (!mins) return res.status(400).json({ message: 'Invalid preset. Use 1h, 2h, or 5h' });
+        untilDate = new Date(Date.now() + mins * 60 * 1000);
+      } else if (mode === 'custom') {
+        const mins = (Number(durationMinutes) || 0) + (Number(durationHours) || 0) * 60;
+        if (!Number.isFinite(mins) || mins <= 0) {
+          return res.status(400).json({ message: 'Provide durationMinutes and/or durationHours > 0' });
+        }
+        untilDate = new Date(Date.now() + mins * 60 * 1000);
+      } else if (mode === 'until-back' || mode === 'manual' || mode === undefined) {
+        // Explicit manual mode or unspecified mode => stay offline until manual online
+        untilDate = null;
+      } else if (mode === 'until-timestamp') {
+        const ts = new Date(until);
+        if (isNaN(ts.getTime())) return res.status(400).json({ message: 'Invalid until timestamp' });
+        if (ts.getTime() <= Date.now()) return res.status(400).json({ message: 'until must be in the future' });
+        untilDate = ts;
+      } else {
+        return res.status(400).json({ message: 'Invalid mode' });
+      }
+      update.offlineUntil = untilDate;
+    }
+
     const updated = await Business.findByIdAndUpdate(
       businessId,
-      { $set: { status } },
+      { $set: update },
       { new: true }
     );
     if (!updated) return res.status(404).json({ message: 'Business not found' });
     res.json({ message: 'Status updated', business: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Availability snapshot
+// GET /api/business/:businessId/availability
+// Returns: { status, offlineSince, offlineUntil, remainingSeconds, serverTime }
+router.get('/:businessId/availability', async (req, res) => {
+  try {
+    const { businessId } = req.params;
+    const doc = await Business.findById(businessId).select('status offlineSince offlineUntil').lean();
+    if (!doc) return res.status(404).json({ message: 'Business not found' });
+    let remainingSeconds = null;
+    if (doc.status === 'offline' && doc.offlineUntil) {
+      remainingSeconds = Math.max(0, Math.ceil((new Date(doc.offlineUntil).getTime() - Date.now()) / 1000));
+    }
+    res.json({ ...doc, remainingSeconds, serverTime: new Date() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

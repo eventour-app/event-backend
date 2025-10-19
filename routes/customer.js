@@ -3,6 +3,11 @@ const router = express.Router();
 const Customer = require('../models/customer');
 const Business = require('../models/Business');
 
+// Utility: escape regex special chars for safe exact-match regex
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Registration API
 router.post('/register', async (req, res) => {
   const { name, email, contact, password, confirmPassword } = req.body;
@@ -58,22 +63,51 @@ module.exports = router;
 router.get('/listings', async (req, res) => {
   try {
     const {
-      serviceType,
+      serviceType, // preferred param
+      category,    // alias supported
+      categories,  // optional CSV list
       q,
       state,
       pincode,
       page = 1,
       limit = 20,
       sort = '-createdAt',
-      visibility = 'public',
+      visibility = 'public', // public => online + verified
+      status, // optional override (e.g., 'online'|'offline')
+      verificationStatus, // optional override ('verified'|'draft')
     } = req.query || {};
 
     const filter = {};
+    // Visibility presets unless overridden
     if (visibility === 'public') {
       filter.status = 'online';
       filter.verificationStatus = 'verified';
+    } else if (visibility === 'online') {
+      filter.status = 'online';
+    } else if (visibility === 'verified') {
+      filter.verificationStatus = 'verified';
+    } // visibility==='all' -> no default filters
+
+    // Allow explicit overrides
+    if (status) filter.status = status;
+    if (verificationStatus) filter.verificationStatus = verificationStatus;
+
+    // Category/serviceType filtering (case-insensitive, supports alias and CSV)
+    const cat = (category ?? serviceType);
+    if (categories) {
+      const list = String(categories)
+        .split(',')
+        .map(s => s && String(s).trim())
+        .filter(Boolean);
+      if (list.length) {
+        filter.$or = filter.$or || [];
+        for (const c of list) {
+          filter.$or.push({ serviceType: { $regex: `^${escapeRegex(c)}$`, $options: 'i' } });
+        }
+      }
+    } else if (cat && String(cat).trim()) {
+      filter.serviceType = { $regex: `^${escapeRegex(String(cat).trim())}$`, $options: 'i' };
     }
-    if (serviceType) filter.serviceType = serviceType;
     if (state) filter['location.state'] = state;
     if (pincode) filter['location.pincode'] = pincode;
 
@@ -121,12 +155,31 @@ router.get('/listings', async (req, res) => {
       Business.countDocuments(filter),
     ]);
 
+    // Attach a lightweight availability snapshot for list view
+    const itemsWithAvailability = items.map(doc => {
+      const isOnline = doc.status === 'online';
+      let remainingSeconds = null;
+      if (!isOnline && doc.offlineUntil) {
+        remainingSeconds = Math.max(0, Math.ceil((new Date(doc.offlineUntil).getTime() - Date.now()) / 1000));
+      }
+      return {
+        ...doc,
+        availability: {
+          status: doc.status,
+          offlineSince: doc.offlineSince || null,
+          offlineUntil: doc.offlineUntil || null,
+          remainingSeconds,
+          isOnline,
+        }
+      };
+    });
+
     res.json({
       page: pageNum,
       limit: limitNum,
       total,
       totalPages: Math.ceil(total / limitNum),
-      items,
+      items: itemsWithAvailability,
     });
   } catch (err) {
     console.error('listings browse error:', err);
@@ -162,9 +215,81 @@ router.get('/listings/:id', async (req, res) => {
       selectedServices: (p.selectedServiceIds || []).map(id => servicesById.get(String(id))).filter(Boolean),
     }));
 
+    // Availability snapshot for details view
+    const isOnline = doc.status === 'online';
+    let remainingSeconds = null;
+    if (!isOnline && doc.offlineUntil) {
+      remainingSeconds = Math.max(0, Math.ceil((new Date(doc.offlineUntil).getTime() - Date.now()) / 1000));
+    }
+    const availability = {
+      status: doc.status,
+      offlineSince: doc.offlineSince || null,
+      offlineUntil: doc.offlineUntil || null,
+      remainingSeconds,
+      isOnline,
+      serverTime: new Date(),
+    };
+
     res.json({
       ...doc,
       packages,
+      availability,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/customer/listings/:id/services - list of services for a listing
+router.get('/listings/:id/services', async (req, res) => {
+  try {
+    const doc = await Business.findById(req.params.id).select({ services: 1 }).lean();
+    if (!doc) return res.status(404).json({ message: 'Listing not found' });
+    res.json({ services: doc.services || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/customer/listings/:id/packages - list of packages with selected services expanded
+router.get('/listings/:id/packages', async (req, res) => {
+  try {
+    const doc = await Business.findById(req.params.id).select({ services: 1, packages: 1 }).lean();
+    if (!doc) return res.status(404).json({ message: 'Listing not found' });
+    const servicesById = new Map((doc.services || []).map(s => [String(s._id), s]));
+    const packages = (doc.packages || []).map(p => ({
+      _id: p._id,
+      name: p.name,
+      price: p.price,
+      description: p.description,
+      createdAt: p.createdAt,
+      active: p.active,
+      selectedServiceIds: p.selectedServiceIds,
+      selectedServices: (p.selectedServiceIds || []).map(id => servicesById.get(String(id))).filter(Boolean),
+    }));
+    res.json({ packages });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/customer/listings/:id/availability - public availability snapshot for a listing
+router.get('/listings/:id/availability', async (req, res) => {
+  try {
+    const doc = await Business.findById(req.params.id).select('status offlineSince offlineUntil').lean();
+    if (!doc) return res.status(404).json({ message: 'Listing not found' });
+    const isOnline = doc.status === 'online';
+    let remainingSeconds = null;
+    if (!isOnline && doc.offlineUntil) {
+      remainingSeconds = Math.max(0, Math.ceil((new Date(doc.offlineUntil).getTime() - Date.now()) / 1000));
+    }
+    res.json({
+      status: doc.status,
+      offlineSince: doc.offlineSince || null,
+      offlineUntil: doc.offlineUntil || null,
+      remainingSeconds,
+      isOnline,
+      serverTime: new Date(),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

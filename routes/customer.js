@@ -2,6 +2,76 @@ const express = require('express');
 const router = express.Router();
 const Customer = require('../models/customer');
 const Business = require('../models/Business');
+const { URL } = require('url');
+
+// Build a public base URL for serving images
+function getBaseUrl(req) {
+  const envBase = process.env.PUBLIC_BASE_URL && String(process.env.PUBLIC_BASE_URL).trim();
+  if (envBase) return envBase.replace(/\/$/, '');
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+// Normalize a possibly absolute/relative image URL to the current/public base
+function normalizeImageUrl(value, req) {
+  if (!value) return value;
+  if (typeof value !== 'string') return value;
+  if (value.startsWith('data:')) return value; // keep data URLs as-is
+  const base = getBaseUrl(req);
+  try {
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      const u = new URL(value);
+      // If it already points at /uploads/*, rewrite origin to our base
+      if (u.pathname && u.pathname.startsWith('/uploads/')) {
+        return `${base}${u.pathname}`;
+      }
+      // Otherwise leave absolute URLs alone
+      return value;
+    }
+  } catch {
+    // fall through and try to treat as relative
+  }
+  // Handle relative paths like "/uploads/..." or "uploads/..."
+  const rel = value.startsWith('/') ? value : `/${value}`;
+  if (rel.startsWith('/uploads/')) return `${base}${rel}`;
+  return value;
+}
+
+function normalizeBusinessDocImages(doc, req) {
+  if (!doc || typeof doc !== 'object') return doc;
+  const out = { ...doc };
+  // Normalize top-level URL fields if present
+  for (const k of ['logoUrl', 'govtIdUrl', 'registrationProofUrl', 'cancelledChequeUrl', 'ownerPhotoUrl', 'previewPhotoUrl']) {
+    if (out[k]) out[k] = normalizeImageUrl(out[k], req);
+  }
+  // Normalize services[].images
+  if (Array.isArray(out.services)) {
+    out.services = out.services.map(s => {
+      if (!s || typeof s !== 'object') return s;
+      const copy = { ...s };
+      if (Array.isArray(copy.images)) {
+        copy.images = copy.images.map(v => normalizeImageUrl(v, req));
+      }
+      return copy;
+    });
+  }
+  // Also normalize package selectedServices if the route expanded them
+  if (Array.isArray(out.packages)) {
+    out.packages = out.packages.map(p => {
+      if (!p || typeof p !== 'object') return p;
+      const copy = { ...p };
+      if (Array.isArray(copy.selectedServices)) {
+        copy.selectedServices = copy.selectedServices.map(s => {
+          if (!s || typeof s !== 'object') return s;
+          const sc = { ...s };
+          if (Array.isArray(sc.images)) sc.images = sc.images.map(v => normalizeImageUrl(v, req));
+          return sc;
+        });
+      }
+      return copy;
+    });
+  }
+  return out;
+}
 
 // Utility: escape regex special chars for safe exact-match regex
 function escapeRegex(str) {
@@ -145,7 +215,7 @@ router.get('/listings', async (req, res) => {
       __v: 0,
     };
 
-    const [items, total] = await Promise.all([
+    const [itemsRaw, total] = await Promise.all([
       Business.find(filter)
         .select(projection)
         .sort(sortSpec)
@@ -155,7 +225,8 @@ router.get('/listings', async (req, res) => {
       Business.countDocuments(filter),
     ]);
 
-    // Attach a lightweight availability snapshot for list view
+    // Normalize image URLs and attach a lightweight availability snapshot for list view
+    const items = itemsRaw.map(doc0 => normalizeBusinessDocImages(doc0, req));
     const itemsWithAvailability = items.map(doc => {
       const isOnline = doc.status === 'online';
       let remainingSeconds = null;
@@ -174,7 +245,7 @@ router.get('/listings', async (req, res) => {
       };
     });
 
-    res.json({
+    return res.json({
       page: pageNum,
       limit: limitNum,
       total,
@@ -199,8 +270,9 @@ router.get('/listings/:id', async (req, res) => {
       previewPhoto: 0,
       __v: 0,
     };
-    const doc = await Business.findById(req.params.id).select(projection).lean();
-    if (!doc) return res.status(404).json({ message: 'Listing not found' });
+  const raw = await Business.findById(req.params.id).select(projection).lean();
+  if (!raw) return res.status(404).json({ message: 'Listing not found' });
+  const doc = normalizeBusinessDocImages(raw, req);
 
     // Build packages with selected services expanded
     const servicesById = new Map((doc.services || []).map(s => [String(s._id), s]));

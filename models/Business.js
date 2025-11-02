@@ -48,6 +48,8 @@ const businessSchema = new mongoose.Schema({
       serviceName: { type: String, required: true },
       price: { type: String, required: true },
       discount: { type: String }, // optional
+      // For FOOD CATERER service types, this caps how many plates a user can order
+      maxPlates: { type: Number, min: 1 },
       images: [String],           // array of image URLs
     }
   ]

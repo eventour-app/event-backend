@@ -38,6 +38,14 @@
 			"command": "npm run server",
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "run-server",
+			"type": "shell",
+			"command": "npm run server",
+			"args": [],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

@@ -29,6 +29,46 @@ function parseDataUrl(data) {
   }
 }
 
+// Build a public base URL for serving images
+function getBaseUrl(req) {
+  const envBase = process.env.PUBLIC_BASE_URL && String(process.env.PUBLIC_BASE_URL).trim();
+  if (envBase) return envBase.replace(/\/$/, '');
+  return `${req.protocol}://${req.get('host')}`; // e.g., http://localhost:4000
+}
+
+// Normalize an incoming image reference into a storable URL
+// Accepts:
+//  - data URLs (data:image/...;base64,...) -> will be processed and saved separately
+//  - absolute http/https URLs -> kept as-is
+//  - relative 'uploads/...' or '/uploads/...' -> rewritten to absolute URL on this server
+function normalizeIncomingImageUrl(value, req) {
+  if (!value || typeof value !== 'string') return null;
+  if (value.startsWith('data:')) return value; // handled by processing path
+  const base = getBaseUrl(req);
+  try {
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      return value; // already absolute; store as-is
+    }
+  } catch {
+    // fallthrough
+  }
+  // Handle relative variants
+  const rel = value.startsWith('/') ? value : `/${value}`;
+  if (rel.startsWith('/uploads/')) return `${base}${rel}`;
+  return null; // unsupported arbitrary relative paths
+}
+
+// Persist a processed image buffer to /uploads and return its public URL
+async function saveBufferAsUpload(processed, prefix, req) {
+  const ext = processed.ext || (processed.mimeType === 'image/png' ? 'png' : 'jpg');
+  const safePrefix = (prefix || 'img').replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const fname = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safePrefix}.${ext}`;
+  const fpath = path.join(uploadsRoot, fname);
+  await fs.promises.writeFile(fpath, processed.buffer);
+  const base = getBaseUrl(req);
+  return `${base}/uploads/${fname}`;
+}
+
 router.all('/register', (req, res) =>
   res.status(410).json({ message: 'Deprecated. Use POST /api/business/onboard' })
 );
@@ -52,7 +92,7 @@ router.all('/register', (req, res) =>
 //   documents?: { govtId?: string, registrationProof?: string, cancelledCheque?: string }, // data URLs/base64
 //   photos?: { ownerPhoto?: string, previewPhoto?: string }, // data URLs/base64
 //   services?: [
-//     { serviceName: string, price: string, discount?: string, images?: string[] } // image data URLs/base64
+//     { serviceName: string, price: string, discount?: string, maxPlates?: number, images?: string[] } // image data URLs/base64
 //   ]
 // }
 router.post('/onboard', async (req, res) => {
@@ -110,6 +150,8 @@ router.post('/onboard', async (req, res) => {
         width: processed.width,
         height: processed.height,
       };
+      // Also persist to disk for public consumption
+      business.logoUrl = await saveBufferAsUpload(processed, 'logo', req);
     }
 
     if (documents && typeof documents === 'object') {
@@ -118,18 +160,21 @@ router.post('/onboard', async (req, res) => {
         if (!p) return res.status(400).json({ message: 'Invalid govtId format' });
         const processed = await processImage(p.buffer, 'doc');
         business.govtId = processed.buffer;
+        business.govtIdUrl = await saveBufferAsUpload(processed, 'govtId', req);
       }
       if (documents.registrationProof) {
         const p = parseDataUrl(documents.registrationProof);
         if (!p) return res.status(400).json({ message: 'Invalid registrationProof format' });
         const processed = await processImage(p.buffer, 'doc');
         business.registrationProof = processed.buffer;
+        business.registrationProofUrl = await saveBufferAsUpload(processed, 'registrationProof', req);
       }
       if (documents.cancelledCheque) {
         const p = parseDataUrl(documents.cancelledCheque);
         if (!p) return res.status(400).json({ message: 'Invalid cancelledCheque format' });
         const processed = await processImage(p.buffer, 'doc');
         business.cancelledCheque = processed.buffer;
+        business.cancelledChequeUrl = await saveBufferAsUpload(processed, 'cancelledCheque', req);
       }
     }
 
@@ -139,12 +184,14 @@ router.post('/onboard', async (req, res) => {
         if (!p) return res.status(400).json({ message: 'Invalid ownerPhoto format' });
         const processed = await processImage(p.buffer, 'doc');
         business.ownerPhoto = processed.buffer;
+        business.ownerPhotoUrl = await saveBufferAsUpload(processed, 'ownerPhoto', req);
       }
       if (photos.previewPhoto) {
         const p = parseDataUrl(photos.previewPhoto);
         if (!p) return res.status(400).json({ message: 'Invalid previewPhoto format' });
         const processed = await processImage(p.buffer, 'doc');
         business.previewPhoto = processed.buffer;
+        business.previewPhotoUrl = await saveBufferAsUpload(processed, 'previewPhoto', req);
       }
     }
 
@@ -158,14 +205,23 @@ router.post('/onboard', async (req, res) => {
           serviceName: s.serviceName,
           price: s.price,
           discount: s.discount,
+          maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
           images: [],
         };
         if (Array.isArray(s.images) && s.images.length) {
           for (const img of s.images) {
-            const p = parseDataUrl(img);
-            if (!p) continue; // skip invalid entries silently
-            const processed = await processImage(p.buffer, 'service');
-            item.images.push(toDataUrl(processed));
+            if (typeof img !== 'string') continue;
+            if (img.startsWith('data:')) {
+              const p = parseDataUrl(img);
+              if (!p) continue; // skip invalid entries silently
+              const processed = await processImage(p.buffer, 'service');
+              // Save to disk and store as public URL rather than giant data URLs
+              const url = await saveBufferAsUpload(processed, 'service', req);
+              item.images.push(url);
+            } else {
+              const normalized = normalizeIncomingImageUrl(img, req);
+              if (normalized) item.images.push(normalized);
+            }
           }
         }
         normalizedServices.push(item);
@@ -359,7 +415,7 @@ router.post('/onboard-multipart',
         for (let i = 0; i < services.length; i++) {
           const s = services[i];
           if (!s || !s.serviceName || !s.price) continue;
-          const item = { _id: new mongoose.Types.ObjectId(), serviceName: s.serviceName, price: s.price, discount: s.discount, images: [] };
+          const item = { _id: new mongoose.Types.ObjectId(), serviceName: s.serviceName, price: s.price, discount: s.discount, maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined, images: [] };
           // If client provided imageIndices mapping, use it; else if files.serviceImages exist, attach all
           if (Array.isArray(s.imageIndices) && files.serviceImages?.length) {
             for (const idx of s.imageIndices) {
@@ -526,6 +582,7 @@ router.post('/:businessId/services', async (req, res) => {
         serviceName: String(s.serviceName),
         price: String(s.price),
         discount: s.discount ? String(s.discount) : undefined,
+        maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
         images: [],
       };
       if (Array.isArray(s.images) && s.images.length) {
@@ -715,6 +772,89 @@ router.get('/user/:userId/online', async (req, res) => {
     const listings = await Business.find({ userId, status: 'online' });
     res.json(listings);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Quote calculation for FOOD CATERER service items
+// GET /api/business/:businessId/services/:serviceId/quote?plates=100
+// Returns: { serviceName, perPlate, plates, total, discountPercent, totalAfterDiscount, breakdown }
+router.get('/:businessId/services/:serviceId/quote', async (req, res) => {
+  try {
+    const { businessId, serviceId } = req.params;
+    const plates = Number(req.query.plates);
+    if (!Number.isFinite(plates) || plates <= 0) {
+      return res.status(400).json({ message: 'plates must be a positive number' });
+    }
+
+    const business = await Business.findById(businessId).lean();
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+    if (!/food\s*caterer/i.test(business.serviceType || '')) {
+      return res.status(400).json({ message: 'Quote endpoint is only available for FOOD CATERER service' });
+    }
+    const svc = (business.services || []).find(s => String(s._id) === String(serviceId));
+    if (!svc) return res.status(404).json({ message: 'Service item not found' });
+
+    // Parse per-plate price (supports strings like "Rs. 100 per plate" or "100")
+    function parsePrice(str) {
+      if (typeof str === 'number') return str;
+      if (typeof str !== 'string') return NaN;
+      const n = Number(str.replace(/[^0-9.]/g, ''));
+      return Number.isFinite(n) ? n : NaN;
+    }
+    const perPlate = parsePrice(svc.price);
+    if (!Number.isFinite(perPlate) || perPlate <= 0) {
+      return res.status(400).json({ message: 'Invalid service price; must be a positive number (in string is ok)' });
+    }
+
+    // Parse discount as percentage if like "20%" or as flat if a number string
+    function parseDiscount(str) {
+      if (!str) return { type: 'percent', value: 0 };
+      if (typeof str === 'number') return { type: 'flat', value: str };
+      if (typeof str === 'string') {
+        const pct = str.match(/([0-9]+(?:\.[0-9]+)?)\s*%/);
+        if (pct) return { type: 'percent', value: Number(pct[1]) };
+        const val = Number(str.replace(/[^0-9.]/g, ''));
+        if (Number.isFinite(val)) return { type: 'flat', value: val };
+      }
+      return { type: 'percent', value: 0 };
+    }
+    const disc = parseDiscount(svc.discount);
+
+    // Enforce maxPlates if provided by vendor
+    if (Number.isFinite(svc.maxPlates) && svc.maxPlates > 0 && plates > svc.maxPlates) {
+      return res.status(400).json({ message: `Requested plates exceed vendor limit`, maxPlates: svc.maxPlates });
+    }
+
+    const total = perPlate * plates;
+    let discountAmount = 0;
+    if (disc.type === 'percent') discountAmount = total * (disc.value / 100);
+    else discountAmount = disc.value; // flat
+    if (discountAmount < 0) discountAmount = 0;
+    if (discountAmount > total) discountAmount = total;
+    const after = total - discountAmount;
+
+    res.json({
+      serviceId: String(svc._id),
+      serviceName: svc.serviceName,
+      perPlate,
+      plates,
+      total,
+      discountPercent: disc.type === 'percent' ? disc.value : null,
+      discountFlat: disc.type === 'flat' ? disc.value : null,
+      totalAfterDiscount: after,
+      breakdown: {
+        label: `${svc.serviceName} - Rs. ${perPlate} per plate`,
+        lines: [
+          { label: 'No. of plate', value: plates },
+          { label: 'Total', value: total },
+          { label: 'Discount Applied', value: disc.type === 'percent' ? `${disc.value}%` : `Rs. ${disc.value}` },
+          { label: 'After discount', value: after }
+        ]
+      }
+    });
+  } catch (err) {
+    console.error('quote error:', err);
     res.status(500).json({ error: err.message });
   }
 });

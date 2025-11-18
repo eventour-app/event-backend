@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const Customer = require('../models/customer');
 const Business = require('../models/Business');
+const Order = require('../models/Order');
+const Transaction = require('../models/Transaction');
+const Review = require('../models/Review');
 const { URL } = require('url');
 
 // Build a public base URL for serving images
@@ -323,6 +326,208 @@ router.get('/listings/:id/services', async (req, res) => {
   }
 });
 
+// ---------------- Orders (User-side) ----------------
+// Helper: map vendor Order shape for customer consumption (mostly same)
+function mapOrder(o) {
+  return {
+    _id: o._id,
+    status: o.status,
+    total: o.total,
+    scheduledAt: o.scheduledAt || null,
+    startTime: o.startTime || null,
+    date: o.date || null,
+    time: o.time || null,
+    createdAt: o.createdAt,
+    businessId: o.businessId,
+    customer: { name: o.customerName, phone: o.customerPhone },
+    serviceName: o.serviceName,
+    packageName: o.packageName,
+    location: o.location || o.venue || null,
+    venue: o.venue || o.location || null,
+    notes: o.notes || null,
+  };
+}
+
+// POST /api/customer/orders - place an order
+// Body: { businessId, items: { serviceId? or packageId?, serviceName?, packageName? }, scheduledAt? | date+time, location?, notes?, contact? }
+router.post('/orders', async (req, res) => {
+  try {
+    const {
+      businessId,
+      serviceName,
+      packageName,
+      scheduledAt,
+      date,
+      time,
+      location,
+      venue,
+      notes,
+      total,
+      customerName,
+      customerPhone,
+    } = req.body || {};
+
+    if (!businessId || (!serviceName && !packageName)) {
+      return res.status(400).json({ message: 'businessId and (serviceName or packageName) are required' });
+    }
+    const biz = await Business.findById(businessId).select('status verificationStatus').lean();
+    if (!biz) return res.status(404).json({ message: 'Listing not found' });
+    if (!(biz.status === 'online' && biz.verificationStatus === 'verified')) {
+      return res.status(400).json({ message: 'Vendor is currently unavailable' });
+    }
+
+    // Identify customer from token if present
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    let customerId = undefined;
+    try {
+      if (token) {
+        const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.role === 'customer') customerId = decoded.id;
+      }
+    } catch {}
+
+    const order = await Order.create({
+      businessId,
+      customerId,
+      customerName: customerName || 'Customer',
+      customerPhone: customerPhone || null,
+      status: 'pending',
+      total: Number(total) || 0,
+      scheduledAt: scheduledAt ? new Date(scheduledAt) : undefined,
+      date: date || undefined,
+      time: time || undefined,
+      serviceName: serviceName || undefined,
+      packageName: packageName || undefined,
+      location: location || venue || undefined,
+      venue: venue || location || undefined,
+      notes: notes || undefined,
+      messages: [{ senderRole: 'system', body: 'Order placed' }],
+    });
+
+    // Optional: create a booking transaction record (gross)
+    if (order.total && order.total > 0) {
+      await Transaction.create({ businessId, orderId: order._id, type: 'booking', amount: order.total, status: 'pending' });
+    }
+
+    return res.status(201).json({ order: mapOrder(order.toObject()) });
+  } catch (err) {
+    console.error('create customer order error:', err);
+    return res.status(500).json({ message: 'Failed to place order' });
+  }
+});
+
+// GET /api/customer/orders - list customer orders (by token) with pagination
+router.get('/orders', async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ message: 'Missing Bearer token' });
+    let customerId;
+    try {
+      const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+      if (decoded.role !== 'customer') return res.status(403).json({ message: 'Forbidden' });
+      customerId = decoded.id;
+    } catch {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+
+    const { page = 1, limit = 20, status } = req.query;
+    const p = Math.max(1, Number(page));
+    const l = Math.min(100, Math.max(1, Number(limit)));
+    const filter = { customerId };
+    if (status) {
+      const statuses = String(status).split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length) filter.status = { $in: statuses };
+    }
+    const totalItems = await Order.countDocuments(filter);
+    const orders = await Order.find(filter).sort({ createdAt: -1 }).skip((p-1)*l).limit(l).lean();
+    res.json({ orders: orders.map(mapOrder), page: p, limit: l, totalItems, totalPages: Math.ceil(totalItems / l) });
+  } catch (err) {
+    console.error('list customer orders error:', err);
+    res.status(500).json({ message: 'Failed to fetch orders' });
+  }
+});
+
+// GET /api/customer/orders/:orderId - fetch one order (must own)
+router.get('/orders/:orderId', async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ message: 'Missing Bearer token' });
+    let customerId;
+    try {
+      const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+      if (decoded.role !== 'customer') return res.status(403).json({ message: 'Forbidden' });
+      customerId = decoded.id;
+    } catch {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+    const order = await Order.findById(req.params.orderId).lean();
+    if (!order || order.customerId !== customerId) return res.status(404).json({ message: 'Order not found' });
+    res.json({ order: mapOrder(order) });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch order' });
+  }
+});
+
+// PUT /api/customer/orders/:orderId/cancel - customer cancels pending/accepted
+router.put('/orders/:orderId/cancel', async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ message: 'Missing Bearer token' });
+    let customerId;
+    try {
+      const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+      if (decoded.role !== 'customer') return res.status(403).json({ message: 'Forbidden' });
+      customerId = decoded.id;
+    } catch {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+    const order = await Order.findById(req.params.orderId);
+    if (!order || order.customerId !== customerId) return res.status(404).json({ message: 'Order not found' });
+    if (!['pending','accepted','upcoming'].includes(order.status)) {
+      return res.status(400).json({ message: 'Only pending/accepted/upcoming orders can be cancelled' });
+    }
+    order.status = 'cancelled';
+    order.messages.push({ senderRole: 'customer', body: 'Order cancelled by customer' });
+    await order.save();
+    // Mark any pending booking transaction as failed/cancelled
+    await Transaction.updateMany({ orderId: order._id, type: 'booking', status: { $in: ['pending','processing'] } }, { $set: { status: 'failed' } });
+    res.json({ order: { _id: order._id, status: order.status, updatedAt: order.updatedAt } });
+  } catch (err) {
+    console.error('cancel order error:', err);
+    res.status(500).json({ message: 'Failed to cancel order' });
+  }
+});
+
+// POST /api/customer/orders/:orderId/message { body }
+router.post('/orders/:orderId/message', async (req, res) => {
+  try {
+    const { body } = req.body || {};
+    if (!body || typeof body !== 'string') return res.status(400).json({ message: 'Message body required' });
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ message: 'Missing Bearer token' });
+    let customerId;
+    try {
+      const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+      if (decoded.role !== 'customer') return res.status(403).json({ message: 'Forbidden' });
+      customerId = decoded.id;
+    } catch {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+    const order = await Order.findById(req.params.orderId);
+    if (!order || order.customerId !== customerId) return res.status(404).json({ message: 'Order not found' });
+    order.messages.push({ senderRole: 'customer', body });
+    await order.save();
+    res.status(201).json({ message: 'Message added', orderId: order._id });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to add message' });
+  }
+});
+
 // GET /api/customer/listings/:id/packages - list of packages with selected services expanded
 router.get('/listings/:id/packages', async (req, res) => {
   try {
@@ -365,5 +570,81 @@ router.get('/listings/:id/availability', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/customer/listings/:id/reviews?limit=3
+router.get('/listings/:id/reviews', async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 3));
+    const businessId = req.params.id;
+    const reviews = await Review.find({ businessId }).sort({ createdAt: -1 }).limit(limit).lean();
+    const averageRatingAgg = await Review.aggregate([
+      { $match: { businessId: require('mongoose').Types.ObjectId.createFromHexString(businessId) } },
+      { $group: { _id: null, avg: { $avg: '$rating' } } }
+    ]);
+    const averageRating = averageRatingAgg.length ? Number(averageRatingAgg[0].avg.toFixed(2)) : null;
+    res.json({ reviews: reviews.map(r => ({ id: r._id, customerName: r.customerName, rating: r.rating, comment: r.comment, createdAt: r.createdAt })), averageRating });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch reviews' });
+  }
+});
+
+// Public quote endpoint for FOOD CATERER (read-only)
+router.get('/listings/:id/services/:serviceId/quote', async (req, res) => {
+  try {
+    const { id, serviceId } = req.params;
+    const plates = Number(req.query.plates);
+    if (!Number.isFinite(plates) || plates <= 0) {
+      return res.status(400).json({ message: 'plates must be a positive number' });
+    }
+    const business = await Business.findById(id).lean();
+    if (!business) return res.status(404).json({ message: 'Listing not found' });
+    if (!/food\s*caterer/i.test(business.serviceType || '')) {
+      return res.status(400).json({ message: 'Quote endpoint is only available for FOOD CATERER service' });
+    }
+    const svc = (business.services || []).find(s => String(s._id) === String(serviceId));
+    if (!svc) return res.status(404).json({ message: 'Service item not found' });
+    function parsePrice(str) {
+      if (typeof str === 'number') return str;
+      if (typeof str !== 'string') return NaN;
+      const n = Number(str.replace(/[^0-9.]/g, ''));
+      return Number.isFinite(n) ? n : NaN;
+    }
+    function parseDiscount(str) {
+      if (!str) return { type: 'percent', value: 0 };
+      if (typeof str === 'number') return { type: 'flat', value: str };
+      if (typeof str === 'string') {
+        const pct = str.match(/([0-9]+(?:\.[0-9]+)?)\s*%/);
+        if (pct) return { type: 'percent', value: Number(pct[1]) };
+        const val = Number(str.replace(/[^0-9.]/g, ''));
+        if (Number.isFinite(val)) return { type: 'flat', value: val };
+      }
+      return { type: 'percent', value: 0 };
+    }
+    const perPlate = parsePrice(svc.price);
+    if (!Number.isFinite(perPlate) || perPlate <= 0) {
+      return res.status(400).json({ message: 'Invalid service price' });
+    }
+    const disc = parseDiscount(svc.discount);
+    if (Number.isFinite(svc.maxPlates) && svc.maxPlates > 0 && plates > svc.maxPlates) {
+      return res.status(400).json({ message: 'Requested plates exceed vendor limit', maxPlates: svc.maxPlates });
+    }
+    const total = perPlate * plates;
+    let discountAmount = disc.type === 'percent' ? total * (disc.value / 100) : disc.value;
+    discountAmount = Math.max(0, Math.min(discountAmount, total));
+    const after = total - discountAmount;
+    res.json({
+      serviceId: String(svc._id),
+      serviceName: svc.serviceName,
+      perPlate,
+      plates,
+      total,
+      discountPercent: disc.type === 'percent' ? disc.value : null,
+      discountFlat: disc.type === 'flat' ? disc.value : null,
+      totalAfterDiscount: after,
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to compute quote' });
   }
 });

@@ -88,6 +88,11 @@ app.use('/api/customer', require('./routes/customer'));
 app.use('/api/customer/auth', require('./routes/customerAuth'));
 app.use('/api/firebase', require('./routes/firebaseAuth'));
 app.use('/api/users', require('./routes/users'));
+// Newly added vendor-related routes
+app.use('/api/listings', require('./routes/listings'));
+app.use('/api/orders', require('./routes/orders'));
+app.use('/api/vendors', require('./routes/vendors'));
+app.use('/api/uploads', require('./routes/uploads'));
 
 app.use((req, res, next) => {
   res.status(404).json({ message: 'Route not found' });

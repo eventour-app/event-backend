@@ -53,6 +53,10 @@ const businessSchema = new mongoose.Schema({
       images: [String],           // array of image URLs
     }
   ]
+  ,
+  // Aggregate rating snapshot (updated when new reviews come in)
+  ratingAvg: { type: Number, min: 0, max: 5, default: null },
+  ratingCount: { type: Number, default: 0 },
 });
 
 // Packages associated with a listing (business)

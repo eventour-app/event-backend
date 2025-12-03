@@ -66,12 +66,14 @@ async function compressToTarget(factory, format, maxKB, desiredKB) {
   }
 
   if (desiredBytes && best.size < desiredBytes) {
+    // Try nudging quality upward a few steps to reach desiredBytes while staying under maxBytes
+    let qualityCursor = typeof best.quality === 'number' ? best.quality : 80;
     for (let i = 0; i < 3; i++) {
-      const nextQ = Math.min(q + 5, 95);
+      const nextQ = Math.min(qualityCursor + 5, 95);
       const { buffer, size } = await encode(factory(), format, { quality: nextQ });
       if (size <= maxBytes) {
         best = { buffer, size, quality: nextQ };
-        q = nextQ;
+        qualityCursor = nextQ;
       } else {
         break;
       }

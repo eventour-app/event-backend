@@ -118,14 +118,14 @@ async function sendSmsOtp(toPhoneRaw, code) {
 }
 
 async function sendOtp(identifier, code, role) {
-  // In non-production, don't try to send; caller can return devCode
-  const isProd = process.env.NODE_ENV === 'production';
-  if (!isProd) return { delivered: false, reason: 'dev_mode' };
-
-  if (isEmail(identifier)) {
-    return sendEmailOtp(identifier, code, role);
+  try {
+    if (isEmail(identifier)) {
+      return await sendEmailOtp(identifier, code, role);
+    }
+    return await sendSmsOtp(identifier, code);
+  } catch (e) {
+    return { delivered: false, reason: e.message };
   }
-  return sendSmsOtp(identifier, code);
 }
 
 module.exports = {

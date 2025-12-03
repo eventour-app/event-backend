@@ -83,7 +83,8 @@ router.all('/register', (req, res) =>
 //   businessInfo: {
 //     ownerName, businessName, email, phone, whatsapp,
 //     location: { address, street, houseNo, plotNo, area, landmark, pincode, state, gps },
-//     workingDays: string[], openingTime, closingTime, gstNumber,
+//     workingDays: string[], openingTime, closingTime,
+//     gstNumber, cinNumber, panNumber, aadhaarNumber,
 //     bankAccount, ifscCode,
 //     isRegisteredBusiness?: boolean,
 //     serviceDetail?: string
@@ -107,10 +108,27 @@ router.post('/onboard', async (req, res) => {
       services = [],
       packages: rawPackages = [],
       logo,
+      minBookingNoticeDays,
     } = req.body || {};
 
     if (!userId || !serviceType) {
       return res.status(400).json({ message: 'userId and serviceType are required' });
+    }
+    // Accept minBookingNoticeDays from root or businessInfo
+    const effectiveMinBooking = (
+      minBookingNoticeDays !== undefined && minBookingNoticeDays !== null
+    ) ? minBookingNoticeDays : businessInfo.minBookingNoticeDays;
+    // Validate minBookingNoticeDays on create (no businessId) or if provided on update
+    if (!businessId) {
+      if (effectiveMinBooking === undefined || effectiveMinBooking === null) {
+        return res.status(400).json({ message: 'minBookingNoticeDays is required' });
+      }
+    }
+    if (effectiveMinBooking !== undefined && effectiveMinBooking !== null) {
+      const val = Number(effectiveMinBooking);
+      if (!Number.isInteger(val) || val < 0) {
+        return res.status(400).json({ message: 'minBookingNoticeDays must be a whole number >= 0' });
+      }
     }
 
     let business = null;
@@ -130,7 +148,7 @@ router.post('/onboard', async (req, res) => {
     const basic = {};
     const fields = [
       'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
-      'workingDays', 'openingTime', 'closingTime', 'gstNumber',
+      'workingDays', 'openingTime', 'closingTime', 'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
       'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
     ];
     for (const f of fields) if (businessInfo[f] !== undefined) basic[f] = businessInfo[f];
@@ -138,6 +156,7 @@ router.post('/onboard', async (req, res) => {
   basic.userId = userId; // ensure association doesn't get lost
     basic.serviceType = serviceType; // ensure stored
     business.set(basic);
+  if (effectiveMinBooking !== undefined && effectiveMinBooking !== null) business.minBookingNoticeDays = Number(effectiveMinBooking);
 
     if (logo) {
       const parsed = parseDataUrl(logo);
@@ -323,6 +342,7 @@ router.post('/onboard-multipart',
       if (!userId || !serviceType) {
         return res.status(400).json({ message: 'userId and serviceType are required' });
       }
+      let { minBookingNoticeDays } = req.body || {};
 
       // Parse JSON fields
       let businessInfo = {};
@@ -330,6 +350,26 @@ router.post('/onboard-multipart',
       let packages = [];
       if (req.body.businessInfo) {
         try { businessInfo = JSON.parse(req.body.businessInfo); } catch { return res.status(400).json({ message: 'businessInfo must be valid JSON' }); }
+      }
+      // Allow minBookingNoticeDays from businessInfo if not provided at root
+      if (minBookingNoticeDays === undefined || minBookingNoticeDays === null) {
+        if (businessInfo && businessInfo.minBookingNoticeDays !== undefined && businessInfo.minBookingNoticeDays !== null) {
+          minBookingNoticeDays = businessInfo.minBookingNoticeDays;
+        }
+      }
+      // Validate presence on create
+      if (!businessId) {
+        if (minBookingNoticeDays === undefined || minBookingNoticeDays === null) {
+          return res.status(400).json({ message: 'minBookingNoticeDays is required' });
+        }
+      }
+      // Validate format if provided
+      if (minBookingNoticeDays !== undefined && minBookingNoticeDays !== null) {
+        const val = Number(minBookingNoticeDays);
+        if (!Number.isInteger(val) || val < 0) {
+          return res.status(400).json({ message: 'minBookingNoticeDays must be a whole number >= 0' });
+        }
+        minBookingNoticeDays = val;
       }
       if (req.body.services) {
         try { services = JSON.parse(req.body.services); } catch { return res.status(400).json({ message: 'services must be valid JSON' }); }
@@ -356,13 +396,15 @@ router.post('/onboard-multipart',
       // Assign core info
       const basic = {};
       const fields = [
-        'ownerName','businessName','email','phone','whatsapp','workingDays','openingTime','closingTime','gstNumber','bankAccount','ifscCode','isRegisteredBusiness','serviceDetail'
+        'ownerName','businessName','email','phone','whatsapp','workingDays','openingTime','closingTime','gstNumber','cinNumber','panNumber','aadhaarNumber',
+        'bankAccount','ifscCode','isRegisteredBusiness','serviceDetail'
       ];
       for (const f of fields) if (businessInfo[f] !== undefined) basic[f] = businessInfo[f];
       if (businessInfo.location) basic.location = businessInfo.location;
       basic.userId = userId;
       basic.serviceType = serviceType;
       business.set(basic);
+  if (minBookingNoticeDays !== undefined) business.minBookingNoticeDays = minBookingNoticeDays;
 
       const baseUrl = `${req.protocol}://${req.get('host')}`; // e.g., http://localhost:4000
       const fileUrl = (f) => `${baseUrl}/uploads/${path.basename(f.path)}`;
@@ -561,6 +603,99 @@ router.post('/onboard-multipart',
     }
   });
 
+  // List services for a business (vendor-side)
+  // GET /api/business/:businessId/services
+  router.get('/:businessId/services', async (req, res) => {
+    try {
+      const { businessId } = req.params;
+      const business = await Business.findById(businessId).lean();
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+      const services = (business.services || []).map(s => ({
+        _id: s._id,
+        serviceName: s.serviceName,
+        price: s.price,
+        discount: s.discount,
+        maxPlates: s.maxPlates,
+        images: s.images,
+      }));
+      res.json({ services });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Update a package
+  // PUT /api/business/:businessId/packages/:packageId
+  // Body (any subset): { name?, price?, description?, active?, selectedServiceIds?: string[] }
+  router.put('/:businessId/packages/:packageId', async (req, res) => {
+    try {
+      const { businessId, packageId } = req.params;
+      const { name, price, description, active, selectedServiceIds } = req.body || {};
+
+      const business = await Business.findById(businessId);
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+      const pkg = (business.packages || []).find(p => String(p._id) === String(packageId));
+      if (!pkg) return res.status(404).json({ message: 'Package not found' });
+
+      if (name !== undefined) pkg.name = String(name).trim();
+      if (price !== undefined) pkg.price = String(price);
+      if (description !== undefined) pkg.description = description === null ? undefined : String(description);
+      if (active !== undefined) pkg.active = !!active;
+
+      if (selectedServiceIds !== undefined) {
+        if (!Array.isArray(selectedServiceIds) || selectedServiceIds.length === 0) {
+          return res.status(400).json({ message: 'selectedServiceIds must be a non-empty array' });
+        }
+        const serviceIdSet = new Set((business.services || []).map(s => String(s._id)));
+        const ids = selectedServiceIds.map(String);
+        const invalid = ids.filter(id => !serviceIdSet.has(id));
+        if (invalid.length) {
+          return res.status(400).json({ message: 'One or more selectedServiceIds do not exist on this listing', invalid });
+        }
+        // de-duplicate while preserving order
+        const seen = new Set();
+        const unique = [];
+        for (const id of ids) { if (!seen.has(id)) { seen.add(id); unique.push(id); } }
+        pkg.selectedServiceIds = unique;
+      }
+
+      await business.save();
+      const servicesById = new Map((business.services || []).map(s => [String(s._id), s]));
+      const out = {
+        _id: pkg._id,
+        name: pkg.name,
+        price: pkg.price,
+        description: pkg.description,
+        active: pkg.active,
+        selectedServiceIds: pkg.selectedServiceIds,
+        selectedServices: (pkg.selectedServiceIds || []).map(id => servicesById.get(String(id))).filter(Boolean),
+      };
+      return res.json({ message: 'Package updated', package: out });
+    } catch (err) {
+      console.error('update package error:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Delete a package
+  // DELETE /api/business/:businessId/packages/:packageId
+  router.delete('/:businessId/packages/:packageId', async (req, res) => {
+    try {
+      const { businessId, packageId } = req.params;
+      const business = await Business.findById(businessId);
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+      const before = (business.packages || []).length;
+      business.packages = (business.packages || []).filter(p => String(p._id) !== String(packageId));
+      const removed = before - (business.packages || []).length;
+      if (!removed) return res.status(404).json({ message: 'Package not found' });
+      await business.save();
+      return res.json({ message: 'Package deleted' });
+    } catch (err) {
+      console.error('delete package error:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
 // ---------------- Add Services to an existing listing ----------------
 // POST /api/business/:businessId/services
 // body: { services: [{ serviceName, price, discount?, images?: string[] (data URLs or URLs) }] }
@@ -613,6 +748,95 @@ router.post('/:businessId/services', async (req, res) => {
   }
 });
 
+
+// Update a single service on a listing
+// PUT /api/business/:businessId/services/:serviceId
+// Body (any subset): { serviceName?, price?, discount?, maxPlates?, images?: string[] }
+router.put('/:businessId/services/:serviceId', async (req, res) => {
+  try {
+    const { businessId, serviceId } = req.params;
+    const { serviceName, price, discount, maxPlates, images } = req.body || {};
+
+    const business = await Business.findById(businessId);
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+
+    const svc = (business.services || []).find(s => String(s._id) === String(serviceId));
+    if (!svc) return res.status(404).json({ message: 'Service not found' });
+
+    if (serviceName !== undefined) svc.serviceName = String(serviceName);
+    if (price !== undefined) svc.price = String(price);
+    if (discount !== undefined) svc.discount = discount === null ? undefined : String(discount);
+    if (maxPlates !== undefined) {
+      const val = Number(maxPlates);
+      if (!Number.isInteger(val) || val <= 0) return res.status(400).json({ message: 'maxPlates must be a positive integer' });
+      svc.maxPlates = val;
+    }
+
+    // If images are provided, replace the entire images array after normalizing
+    if (images !== undefined) {
+      if (!Array.isArray(images)) return res.status(400).json({ message: 'images must be an array of strings' });
+      const out = [];
+      for (const img of images) {
+        if (typeof img !== 'string') continue;
+        if (img.startsWith('data:')) {
+          const p = parseDataUrl(img);
+          if (!p) continue;
+          const processed = await processImage(p.buffer, 'service');
+          const url = await saveBufferAsUpload(processed, 'service', req);
+          out.push(url);
+        } else {
+          const normalized = normalizeIncomingImageUrl(img, req);
+          if (normalized) out.push(normalized);
+        }
+      }
+      svc.images = out;
+    }
+
+    await business.save();
+    return res.json({ message: 'Service updated', service: svc });
+  } catch (err) {
+    console.error('update service error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a single service and remove it from any packages; packages left empty are removed
+// DELETE /api/business/:businessId/services/:serviceId
+router.delete('/:businessId/services/:serviceId', async (req, res) => {
+  try {
+    const { businessId, serviceId } = req.params;
+    const business = await Business.findById(businessId);
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+
+    const beforeCount = (business.services || []).length;
+    business.services = (business.services || []).filter(s => String(s._id) !== String(serviceId));
+    const removed = beforeCount - business.services.length;
+    if (!removed) return res.status(404).json({ message: 'Service not found' });
+
+    let packagesAffected = 0;
+    let packagesRemoved = 0;
+    if (Array.isArray(business.packages)) {
+      const next = [];
+      for (const p of business.packages) {
+        const origLen = (p.selectedServiceIds || []).length;
+        p.selectedServiceIds = (p.selectedServiceIds || []).filter(id => String(id) !== String(serviceId));
+        if (p.selectedServiceIds.length === 0) {
+          packagesRemoved += 1; // drop empty package
+          continue;
+        }
+        if (p.selectedServiceIds.length !== origLen) packagesAffected += 1;
+        next.push(p);
+      }
+      business.packages = next;
+    }
+
+    await business.save();
+    return res.json({ message: 'Service deleted', packagesAffected, packagesRemoved });
+  } catch (err) {
+    console.error('delete service error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // Update online/offline status with optional scheduling support
 // PUT /api/business/:businessId/status
@@ -902,9 +1126,31 @@ router.all('/service-images/:businessId/:serviceIndex', (req, res) =>
   res.status(410).json({ message: 'Deprecated. Send service images in POST /api/business/onboard' })
 );
 
-module.exports = router;
+// Lookup by business contact phone to prefill onboarding extra fields
+// GET /api/business/lookup/by-phone?phone=XXXXXXXXXX
+// Returns 404 if not found. If found: { businessId, phone, ownerName, businessName, gstNumber, cinNumber, panNumber, aadhaarNumber }
+router.get('/lookup/by-phone', async (req, res) => {
+  try {
+    const { phone } = req.query || {};
+    if (!phone || typeof phone !== 'string') {
+      return res.status(400).json({ message: 'phone query param is required' });
+    }
+    const doc = await Business.findOne({ phone }).select('phone ownerName businessName gstNumber cinNumber panNumber aadhaarNumber').lean();
+    if (!doc) return res.status(404).json({ message: 'No business found for phone' });
+    return res.json({
+      businessId: doc._id,
+      phone: doc.phone,
+      ownerName: doc.ownerName,
+      businessName: doc.businessName,
+      gstNumber: doc.gstNumber,
+      cinNumber: doc.cinNumber,
+      panNumber: doc.panNumber,
+      aadhaarNumber: doc.aadhaarNumber,
+    });
+  } catch (err) {
+    console.error('lookup by phone error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-// Deprecated: legacy fetch-by-user at root path caused conflicts with other routes
-router.all('/:userId', (req, res) =>
-  res.status(410).json({ message: 'Deprecated. Use GET /api/business/user/:userId or /api/business/user/:userId/online' })
-);
+module.exports = router;

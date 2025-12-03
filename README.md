@@ -109,6 +109,9 @@ Request body
       "openingTime": "09:00 AM",
       "closingTime": "09:00 PM",
       "gstNumber": "string",
+      "cinNumber": "string",
+      "panNumber": "string",
+      "aadhaarNumber": "string",
       "bankAccount": "string",
       "ifscCode": "string",
       "isRegisteredBusiness": true,
@@ -167,10 +170,28 @@ Body
 { "accepted": true }
 ```
 
-### 4) Fetch listings
+### 4) Prefill by existing business phone
 
-- All listings for a user (any status): GET `/api/business/user/:userId`
-- Only ONLINE listings for a user: GET `/api/business/user/:userId/online`
+Before starting signup, you can check if a business already exists for a phone number.
+
+GET `/api/business/lookup/by-phone?phone=9876543210`
+
+Response if exists:
+```
+200 OK
+{
+  "businessId": "...",
+  "phone": "9876543210",
+  "ownerName": "Existing Owner",
+  "businessName": "Existing Business",
+  "gstNumber": "GST123...",
+  "cinNumber": "CIN456...",
+  "panNumber": "PAN789...",
+  "aadhaarNumber": "AADHAAR000..."
+}
+```
+
+404 if no match.
 
 ### Deprecated endpoints (return 410)
 
@@ -182,3 +203,40 @@ Body
 - `PUT /api/business/logo/:businessId`
 - `PUT /api/business/service-images/:businessId/:serviceIndex`
 - `GET /api/business/:userId` (conflicted path)
+
+## Firebase Phone OTP
+
+The current OTP flow uses Firebase Identity Toolkit REST endpoints (NOT the service account file). You must set `FIREBASE_API_KEY`.
+
+Steps:
+1. Firebase Console → Project Settings → General → Your apps → Config snippet → Copy `apiKey`.
+2. Add to `.env`: `FIREBASE_API_KEY=AIzaSy...`
+3. Restart backend (`npm run server`).
+4. Test: `POST /api/auth/send-otp` with `{ "phone": "+<E164 number>" }` → Should return `{ message: "OTP sent", provider: "firebase" }`.
+
+Environment variables (see `.env.example`):
+- `FIREBASE_API_KEY` (required) Web API key.
+- `DEFAULT_COUNTRY_CODE` (optional) Used for normalization when user supplies local numbers without + prefix.
+
+Security notes:
+- Do NOT commit `.env` to source control.
+- The service account JSON is not used for phone OTP; keep it restricted or remove if unnecessary.
+
+Failure modes:
+- 500 with `Firebase phone auth is not configured` → Missing `FIREBASE_API_KEY`.
+- 500 with `Failed to send OTP` → Network/API error; check console for Firebase error message.
+- 400 `Invalid OTP` on verify → Wrong code or expired session.
+
+### Firebase Client SDK Usage
+
+A helper file `firebaseClient.js` initializes Firebase for the client. Example usage in your Expo app:
+
+```js
+import { firebaseApp } from '../firebaseClient';
+import { getAuth, signInWithPhoneNumber, RecaptchaVerifier } from 'firebase/auth';
+
+const auth = getAuth(firebaseApp);
+// Implement client-side phone auth (recommended) then send ID token to backend if needed.
+```
+
+For pure backend phone verification we currently use REST endpoints with `FIREBASE_API_KEY`. Client-side flows provide better UX (automatic SMS code reading on Android, etc.).

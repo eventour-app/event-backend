@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { normalizePhone } = require('../utils/messenger');
 
 // Address subdocument schema
 const addressSchema = new mongoose.Schema({
@@ -16,7 +17,9 @@ const userSchema = new mongoose.Schema({
   passwordHash: { type: String, required: true },
 
   // Profile fields
-  phone: { type: String, trim: true }, // E.164 preferred
+  phone: { type: String, trim: true, index: { unique: false } }, // E.164 preferred
+  // Stable code used to link multiple business listings to the same vendor
+  vendorCode: { type: String, unique: true, sparse: true, index: true },
   bio: { type: String, trim: true },
 
   // Address (nested and top-level duplicates for UI flexibility)
@@ -47,6 +50,14 @@ function syncAddress(doc) {
 }
 
 userSchema.pre('save', function(next) {
+  // normalize phone
+  if (this.phone) this.phone = normalizePhone(this.phone);
+  // generate vendorCode if missing
+  if (!this.vendorCode) {
+    // simple deterministic seed based on _id; but ensure uniqueness randomness fallback
+    const base = this._id ? String(this._id).slice(-6).toUpperCase() : Math.random().toString(36).slice(2,8).toUpperCase();
+    this.vendorCode = `VND-${base}`;
+  }
   syncAddress(this);
   next();
 });
@@ -84,7 +95,12 @@ userSchema.pre('findOneAndUpdate', function(next) {
     $set.email = $set.email.toLowerCase().trim();
   }
   if ($set.phone && typeof $set.phone === 'string') {
-    $set.phone = $set.phone.trim();
+    $set.phone = normalizePhone($set.phone);
+  }
+  // ensure vendorCode exists when updating if absent
+  if (!$set.vendorCode) {
+    const id = this.getQuery() && this.getQuery()._id ? String(this.getQuery()._id) : Math.random().toString(36).slice(2,8);
+    $set.vendorCode = `VND-${id.slice(-6).toUpperCase()}`;
   }
 
   // write back the composed update

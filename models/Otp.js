@@ -3,7 +3,9 @@ const mongoose = require('mongoose');
 const otpSchema = new mongoose.Schema({
   identifier: { type: String, required: true, index: true }, // email or phone
   role: { type: String, enum: ['vendor', 'customer'], required: true, index: true },
-  code: { type: String, required: true },
+  provider: { type: String, enum: ['local', 'firebase'], default: 'local', index: true },
+  code: { type: String, required: function() { return this.provider === 'local'; } },
+  firebaseSessionInfo: { type: String }, // present when provider === 'firebase'
   expiresAt: { type: Date, required: true },
   attempts: { type: Number, default: 0 },
   lastSentAt: { type: Date, default: Date.now },

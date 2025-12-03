@@ -10,7 +10,7 @@ function err(res, status, message, code, details) { return res.status(status).js
 // POST /api/listings/publish { businessId }
 router.post('/publish', async (req, res) => {
   try {
-    const { businessId } = req.body || {};
+  const { businessId } = req.body || {};
     if (!businessId) return err(res, 400, 'businessId is required', 'VALIDATION_FAILED');
 
     const biz = await Business.findById(businessId).select('_id status verificationStatus');
@@ -19,7 +19,12 @@ router.post('/publish', async (req, res) => {
     // Single listing per business: upsert published listing
     let listing = await Listing.findOne({ businessId });
     if (!listing) {
-      listing = await Listing.create({ businessId, status: 'published', visibility: 'public', publishedAt: new Date() });
+      listing = await Listing.create({
+        businessId,
+        status: 'published',
+        visibility: 'public',
+        publishedAt: new Date(),
+      });
     } else {
       if (listing.status !== 'published') {
         listing.status = 'published';

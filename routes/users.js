@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const User = require('../models/user');
 const Business = require('../models/Business');
+const { normalizePhone } = require('../utils/messenger');
 
 const router = express.Router();
 
@@ -86,10 +87,15 @@ router.patch('/:id', async (req, res) => {
     }
     if (phone !== undefined) {
       if (typeof phone !== 'string') return res.status(400).json({ message: 'Invalid phone' });
-      const p = phone.trim();
-      // Simple E.164-ish check (+, digits 8-15) - leniency for dev
-      if (!/^\+?[0-9]{8,15}$/.test(p)) return res.status(400).json({ message: 'Phone must be E.164 (e.g., +918000000000)' });
-      set.phone = p;
+      const normalized = normalizePhone(phone);
+      const digits = normalized.replace(/\D/g, '');
+      if (digits.length < 8 || digits.length > 15) {
+        return res.status(400).json({ message: 'Phone must be a valid number (8-15 digits after country code)' });
+      }
+      // Enforce uniqueness across users (excluding self)
+      const existing = await User.findOne({ phone: normalized, _id: { $ne: id } });
+      if (existing) return res.status(409).json({ message: 'Phone already in use' });
+      set.phone = normalized;
     }
     if (bio !== undefined) {
       if (typeof bio !== 'string') return res.status(400).json({ message: 'Invalid bio' });

@@ -28,7 +28,22 @@ const businessSchema = new mongoose.Schema({
   workingDays: [{ type: String }], // e.g. ["Mon","Tue","Wed"]
   openingTime: { type: String },
   closingTime: { type: String },
+  // Minimum number of days in advance a user must book an event/service from this business.
+  // Required during onboarding (create) and may be updated later.
+  minBookingNoticeDays: {
+    type: Number,
+    required: [true, 'Minimum advance booking days is required'],
+    min: [0, 'Minimum advance booking days cannot be negative'],
+    validate: {
+      validator: Number.isInteger,
+      message: 'Minimum advance booking days must be a whole number',
+    },
+    index: true,
+  },
   gstNumber: { type: String }, // optional
+  cinNumber: { type: String }, // optional
+  panNumber: { type: String }, // optional
+  aadhaarNumber: { type: String }, // optional
   createdAt: { type: Date, default: Date.now },
   bankAccount: { type: String },
   ifscCode: { type: String },

@@ -3,7 +3,8 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 const Otp = require('../models/Otp');
-const { sendOtp: sendOtpMessage } = require('../utils/messenger');
+const { normalizePhone } = require('../utils/phone');
+const firebasePhone = require('../utils/firebasePhone');
 
 const router = express.Router();
 
@@ -11,20 +12,28 @@ const router = express.Router();
 const signToken = (user) =>
   jwt.sign({ sub: user._id, email: user.email, role: 'vendor' }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-// register
+// register (Vendor)
+// Body: { name?, email, password, phone }
 router.post('/register', async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ message: 'Email & password required' });
+    const { name, email, password, phone } = req.body || {};
+    if (!email || !password || !phone) return res.status(400).json({ message: 'email, password and phone are required' });
 
-    const exists = await User.findOne({ email });
-    if (exists) return res.status(409).json({ message: 'Email already in use' });
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedPhone = normalizePhone(phone);
+
+    const [emailExists, phoneExists] = await Promise.all([
+      User.findOne({ email: normalizedEmail }),
+      User.findOne({ phone: normalizedPhone }),
+    ]);
+    if (emailExists) return res.status(409).json({ message: 'Email already in use' });
+    if (phoneExists) return res.status(409).json({ message: 'Phone already in use' });
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = await User.create({ name, email, passwordHash });
+    const user = await User.create({ name, email: normalizedEmail, phone: normalizedPhone, passwordHash });
     const token = signToken(user);
 
-    res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email } });
+    res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone } });
   } catch (e) {
     res.status(500).json({ message: 'Register failed' });
   }
@@ -52,9 +61,7 @@ router.get('/me', async (req, res) => {
     }
 
     const token = authHeader.split(' ')[1]; // Bearer <token>
-    if (!token) {
-    res.status(201).json({ token, userId: user._id.toString(), user: { id: user._id, name: user.name, email: user.email } });
-    }
+    if (!token) return res.status(401).json({ message: 'No token provided' });
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.sub).select('-passwordHash');
@@ -70,14 +77,17 @@ router.get('/me', async (req, res) => {
   }
 });
 
-// --- OTP LOGIN for Vendors ---
-// POST /api/auth/send-otp { identifier: emailOrPhone }
+// --- OTP LOGIN for Vendors (PHONE-ONLY, must be registered) ---
+// POST /api/auth/send-otp { phone }
 router.post('/send-otp', async (req, res) => {
   try {
-    const { identifier } = req.body;
-    if (!identifier) return res.status(400).json({ message: 'identifier (email or phone) is required' });
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).json({ message: 'phone is required' });
+    const norm = normalizePhone(phone);
 
-    const norm = String(identifier).toLowerCase().trim();
+    // Only allow OTP for registered numbers
+    const user = await User.findOne({ phone: norm });
+    if (!user) return res.status(404).json({ message: 'Phone number is not registered' });
 
     // throttle: allow resend every 30s
     const now = Date.now();
@@ -87,57 +97,62 @@ router.post('/send-otp', async (req, res) => {
       return res.status(429).json({ message: `Please wait ${wait}s before requesting another OTP` });
     }
 
-    const code = (Math.floor(100000 + Math.random() * 900000)).toString(); // 6-digit
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 min
 
-    await Otp.create({ identifier: norm, role: 'vendor', code, expiresAt, lastSentAt: new Date() });
-
-    const isProd = process.env.NODE_ENV === 'production';
-    if (isProd) {
-      try {
-        await sendOtpMessage(norm, code, 'vendor');
-        return res.json({ message: 'OTP sent' });
-      } catch (e) {
-        console.error('OTP delivery failed (vendor):', e.message);
-        // still return success to avoid user enumeration; optionally include a hint in non-prod
-        return res.json({ message: 'OTP sent' });
-      }
+    // If Firebase is configured, use it for real SMS OTP
+    const firebaseConfigured = firebasePhone && firebasePhone.isConfigured && firebasePhone.isConfigured();
+    if (!firebaseConfigured) {
+      return res.status(500).json({ message: 'Firebase phone auth is not configured (FIREBASE_API_KEY missing)' });
     }
-    // Dev mode - return the code to the caller
-    res.json({ message: 'OTP sent', devCode: code });
+    try {
+      const { sessionInfo } = await firebasePhone.startPhoneVerification(norm);
+      await Otp.create({ identifier: norm, role: 'vendor', provider: 'firebase', firebaseSessionInfo: sessionInfo, expiresAt, lastSentAt: new Date() });
+      return res.json({ message: 'OTP sent', provider: 'firebase' });
+    } catch (e) {
+      console.error('Firebase phone send OTP failed:', e.message);
+      // Surface firebase error code when possible for diagnostics
+      const msg = (e && e.message) || 'Failed to send OTP';
+      const lower = msg.toLowerCase();
+      // Extract potential error code at end of message pattern: "...): SOME_CODE"
+      let code;
+      const match = msg.match(/\b([A-Z0-9_]{8,})$/);
+      if (match) code = match[1];
+      return res.status(500).json({ message: 'Failed to send OTP', error: code || msg });
+    }
   } catch (err) {
     console.error('send-otp vendor error:', err);
     res.status(500).json({ message: 'Failed to send OTP' });
   }
 });
 
-// POST /api/auth/verify-otp { identifier, code }
+// POST /api/auth/verify-otp { phone, code }
 router.post('/verify-otp', async (req, res) => {
   try {
-    const { identifier, code, name } = req.body;
-    if (!identifier || !code) return res.status(400).json({ message: 'identifier and code are required' });
-    const norm = String(identifier).toLowerCase().trim();
+    const { phone, code } = req.body || {};
+    if (!phone || !code) return res.status(400).json({ message: 'phone and code are required' });
+    const norm = normalizePhone(phone);
 
     const record = await Otp.findOne({ identifier: norm, role: 'vendor' }).sort({ createdAt: -1 });
     if (!record) return res.status(400).json({ message: 'OTP not found. Please request a new one.' });
     if (record.expiresAt < new Date()) return res.status(400).json({ message: 'OTP expired' });
-    if (record.code !== String(code)) return res.status(400).json({ message: 'Invalid OTP' });
-
-    // upsert vendor user by email/phone as email field if it includes '@'
-    const isEmail = norm.includes('@');
-    const email = isEmail ? norm : undefined;
-    let user = email ? await User.findOne({ email }) : null;
-    if (!user) {
-      // Create minimal user without password when OTP login
-      const fakePasswordHash = await bcrypt.hash(Math.random().toString(36), 10);
-      user = await User.create({ name: name || 'Vendor', email: email || `${norm}@placeholder.local`, passwordHash: fakePasswordHash });
+    if (record.provider !== 'firebase') {
+      return res.status(400).json({ message: 'Unsupported OTP provider (expected firebase)' });
     }
+    try {
+      await firebasePhone.verifyPhoneCode(record.firebaseSessionInfo, String(code));
+    } catch (e) {
+      return res.status(400).json({ message: 'Invalid OTP' });
+    }
+
+    // Only allow login for existing vendor accounts with this phone
+    const user = await User.findOne({ phone: norm });
+    if (!user) return res.status(404).json({ message: 'Phone number is not registered' });
 
     // Consume OTP (delete)
     await Otp.deleteMany({ identifier: norm, role: 'vendor' });
 
     const token = signToken(user);
-      res.json({ token, userId: user._id.toString(), user: { id: user._id, name: user.name, email: user.email }, role: 'vendor' });
+    res.json({ token, userId: user._id.toString(), user: { id: user._id, name: user.name, email: user.email, phone: user.phone }, role: 'vendor' });
   } catch (err) {
     console.error('verify-otp vendor error:', err);
     res.status(500).json({ message: 'Failed to verify OTP' });

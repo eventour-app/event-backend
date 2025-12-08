@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/user');
 const Business = require('../models/Business');
 const { generateVendorCode } = require('../utils/vendorCode');
+const { THEMES, EVENT_TYPES } = require('../utils/vendorSpecializations');
 
 function err(res, status, message, code, details) { return res.status(status).json({ error: true, message, code, ...(details?{details}:{}) }); }
 
@@ -190,3 +191,63 @@ router.get('/:phone/businesses', async (req, res) => {
 });
 
 module.exports = router;
+
+// --- Vendor Specializations: Themes & Event Types ---
+// GET /api/vendor-mobile/specializations-options
+// Returns fixed lists of themes and eventTypes
+router.get('/specializations-options', (req, res) => {
+  try {
+    res.json({ themes: THEMES, eventTypes: EVENT_TYPES });
+  } catch (e) {
+    console.error('specializations-options error', e);
+    err(res, 500, 'Failed to load options', 'SERVER_ERROR');
+  }
+});
+
+// POST /api/vendor-mobile/:businessId/specializations
+// Body: { themes: string[], eventTypes: string[] }
+// Stores vendor selections on Business doc. Requires at least one in each.
+router.post('/:businessId/specializations', async (req, res) => {
+  try {
+    const { businessId } = req.params;
+    const { themes = [], eventTypes = [] } = req.body || {};
+
+    const t = Array.isArray(themes) ? themes.map(String) : [];
+    const e = Array.isArray(eventTypes) ? eventTypes.map(String) : [];
+
+    if (!t.length) return err(res, 400, 'Select at least one theme', 'VALIDATION_FAILED');
+    if (!e.length) return err(res, 400, 'Select at least one event type', 'VALIDATION_FAILED');
+
+    // Validate against fixed options
+    const invalidThemes = t.filter(x => !THEMES.includes(x));
+    const invalidEventTypes = e.filter(x => !EVENT_TYPES.includes(x));
+    if (invalidThemes.length) return err(res, 400, 'Invalid theme(s) selected', 'VALIDATION_FAILED', { invalidThemes });
+    if (invalidEventTypes.length) return err(res, 400, 'Invalid event type(s) selected', 'VALIDATION_FAILED', { invalidEventTypes });
+
+    const updated = await Business.findByIdAndUpdate(
+      businessId,
+      { $set: { themes: t, eventTypes: e } },
+      { new: true }
+    ).lean();
+    if (!updated) return err(res, 404, 'Business not found', 'NOT_FOUND');
+
+    res.json({ message: 'Specializations saved', business: { _id: updated._id, themes: updated.themes, eventTypes: updated.eventTypes } });
+  } catch (e) {
+    console.error('save specializations error', e);
+    err(res, 500, 'Failed to save specializations', 'SERVER_ERROR');
+  }
+});
+
+// GET /api/vendor-mobile/:businessId/specializations
+// Returns saved selections for the business
+router.get('/:businessId/specializations', async (req, res) => {
+  try {
+    const { businessId } = req.params;
+    const biz = await Business.findById(businessId).select('themes eventTypes').lean();
+    if (!biz) return err(res, 404, 'Business not found', 'NOT_FOUND');
+    res.json({ themes: biz.themes || [], eventTypes: biz.eventTypes || [] });
+  } catch (e) {
+    console.error('get specializations error', e);
+    err(res, 500, 'Failed to load specializations', 'SERVER_ERROR');
+  }
+});

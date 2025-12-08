@@ -4,7 +4,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Customer = require('../models/customer');
 const Otp = require('../models/Otp');
-const { sendOtp: sendOtpMessage } = require('../utils/messenger');
+const { sendOtp: sendOtpMessage, isEmail } = require('../utils/messenger');
+const twilioVerify = require('../utils/twilio');
 
 
 // Login API (password)
@@ -42,6 +43,21 @@ router.post('/send-otp', async (req, res) => {
     if (!identifier) return res.status(400).json({ message: 'identifier is required' });
     const norm = String(identifier).toLowerCase().trim();
 
+    // Ensure identifier belongs to an existing customer account
+    let customerExists = false;
+    if (isEmail(norm)) {
+      const c = await Customer.findOne({ email: norm }).select('_id');
+      customerExists = !!c;
+    } else {
+      // contact is stored as digits; normalize to E.164 then strip non-digits for comparison
+      const digits = String(norm).replace(/\D/g, '');
+      const c = await Customer.findOne({ contact: digits }).select('_id');
+      customerExists = !!c;
+    }
+    if (!customerExists) {
+      return res.status(404).json({ message: 'Account not found for provided identifier' });
+    }
+
     const now = Date.now();
     const existing = await Otp.findOne({ identifier: norm, role: 'customer' }).sort({ createdAt: -1 });
     if (existing && existing.lastSentAt && now - existing.lastSentAt.getTime() < 30 * 1000) {
@@ -49,21 +65,30 @@ router.post('/send-otp', async (req, res) => {
       return res.status(429).json({ message: `Please wait ${wait}s before requesting another OTP` });
     }
 
-    const code = (Math.floor(100000 + Math.random() * 900000)).toString();
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-
-    await Otp.create({ identifier: norm, role: 'customer', code, expiresAt, lastSentAt: new Date() });
-    const isProd = process.env.NODE_ENV === 'production';
-    if (isProd) {
+    // If email identifier, keep email OTP via messenger
+    if (isEmail(norm)) {
+      const code = (Math.floor(100000 + Math.random() * 900000)).toString();
+      await Otp.create({ identifier: norm, role: 'customer', provider: 'local', code, expiresAt, lastSentAt: new Date(), channel: 'email' });
       try {
         await sendOtpMessage(norm, code, 'customer');
-        return res.json({ message: 'OTP sent' });
       } catch (e) {
-        console.error('OTP delivery failed (customer):', e.message);
-        return res.json({ message: 'OTP sent' });
+        console.error('Email OTP delivery failed (customer):', e.message);
       }
+      return res.json({ message: 'OTP sent' });
     }
-    res.json({ message: 'OTP sent', devCode: code });
+    // Phone identifier: use Twilio Verify
+    if (!twilioVerify.isConfigured()) {
+      return res.status(500).json({ message: 'Twilio Verify is not configured (set TWILIO_* env vars)' });
+    }
+    try {
+      await twilioVerify.sendVerification(norm, 'sms');
+      await Otp.create({ identifier: norm, role: 'customer', provider: 'twilio', channel: 'sms', expiresAt, lastSentAt: new Date() });
+      return res.json({ message: 'OTP sent' });
+    } catch (e) {
+      console.error('Twilio send OTP (customer) failed:', e.message);
+      return res.status(500).json({ message: 'Failed to send OTP' });
+    }
   } catch (err) {
     console.error('send-otp customer error:', err);
     res.status(500).json({ message: 'Failed to send OTP' });
@@ -74,26 +99,35 @@ router.post('/send-otp', async (req, res) => {
 // POST /api/customer/auth/verify-otp { identifier, code, name, contact }
 router.post('/verify-otp', async (req, res) => {
   try {
-    const { identifier, code, name, contact } = req.body;
+  const { identifier, code } = req.body;
     if (!identifier || !code) return res.status(400).json({ message: 'identifier and code are required' });
     const norm = String(identifier).toLowerCase().trim();
 
     const record = await Otp.findOne({ identifier: norm, role: 'customer' }).sort({ createdAt: -1 });
     if (!record) return res.status(400).json({ message: 'OTP not found. Please request a new one.' });
     if (record.expiresAt < new Date()) return res.status(400).json({ message: 'OTP expired' });
-    if (record.code !== String(code)) return res.status(400).json({ message: 'Invalid OTP' });
-
-    let customer = await Customer.findOne({ email: norm });
-    if (!customer) {
-      // Create customer with minimal info
-      const tempPassword = Math.random().toString(36);
-      customer = await Customer.create({
-        name: name || 'Guest',
-        email: norm.includes('@') ? norm : `${norm}@placeholder.local`,
-        contact: contact || 'N/A',
-        password: tempPassword,
-      });
+    if (isEmail(norm)) {
+      if (record.provider !== 'local') return res.status(400).json({ message: 'Unsupported OTP provider' });
+      if (record.code !== String(code)) return res.status(400).json({ message: 'Invalid OTP' });
+    } else {
+      if (record.provider !== 'twilio') return res.status(400).json({ message: 'Unsupported OTP provider (expected twilio)' });
+      try {
+        const resp = await twilioVerify.checkVerification(norm, String(code));
+        if (resp.status !== 'approved') return res.status(400).json({ message: 'Invalid OTP' });
+      } catch (e) {
+        return res.status(400).json({ message: 'Invalid OTP' });
+      }
     }
+
+    // Ensure the identifier belongs to an existing account
+    let customer = null;
+    if (isEmail(norm)) {
+      customer = await Customer.findOne({ email: norm });
+    } else {
+      const digits = String(norm).replace(/\D/g, '');
+      customer = await Customer.findOne({ contact: digits });
+    }
+    if (!customer) return res.status(404).json({ message: 'Account not found for provided identifier' });
 
     await Otp.deleteMany({ identifier: norm, role: 'customer' });
 

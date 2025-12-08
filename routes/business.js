@@ -227,6 +227,22 @@ router.post('/onboard', async (req, res) => {
           maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
           images: [],
         };
+        // Photographer-specific tiered rates (hours → charge)
+        // Accept when listing serviceType includes "photographer" (case-insensitive)
+        if (/photographer/i.test(String(serviceType || ''))) {
+          if (Array.isArray(s.rates)) {
+            const rates = [];
+            for (const r of s.rates) {
+              if (!r) continue;
+              const hours = Number(r.hours);
+              const charge = r.charge;
+              if (!Number.isInteger(hours) || hours <= 0) continue;
+              if (typeof charge !== 'string' || !String(charge).trim()) continue;
+              rates.push({ hours, charge: String(charge) });
+            }
+            if (rates.length) item.rates = rates;
+          }
+        }
         if (Array.isArray(s.images) && s.images.length) {
           for (const img of s.images) {
             if (typeof img !== 'string') continue;
@@ -458,6 +474,21 @@ router.post('/onboard-multipart',
           const s = services[i];
           if (!s || !s.serviceName || !s.price) continue;
           const item = { _id: new mongoose.Types.ObjectId(), serviceName: s.serviceName, price: s.price, discount: s.discount, maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined, images: [] };
+          // Photographer-specific tiered rates
+          if (/photographer/i.test(String(serviceType || ''))) {
+            if (Array.isArray(s.rates)) {
+              const rates = [];
+              for (const r of s.rates) {
+                if (!r) continue;
+                const hours = Number(r.hours);
+                const charge = r.charge;
+                if (!Number.isInteger(hours) || hours <= 0) continue;
+                if (typeof charge !== 'string' || !String(charge).trim()) continue;
+                rates.push({ hours, charge: String(charge) });
+              }
+              if (rates.length) item.rates = rates;
+            }
+          }
           // If client provided imageIndices mapping, use it; else if files.serviceImages exist, attach all
           if (Array.isArray(s.imageIndices) && files.serviceImages?.length) {
             for (const idx of s.imageIndices) {

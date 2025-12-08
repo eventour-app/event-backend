@@ -53,6 +53,10 @@ const businessSchema = new mongoose.Schema({
   partnerContractAccepted: { type: Boolean, default: false },
   isRegisteredBusiness: { type: Boolean, default: false },
   serviceDetail: { type: String },
+  // Vendor specialization selections
+  // Fixed options provided by backend; stored as string arrays
+  themes: [{ type: String }],
+  eventTypes: [{ type: String }],
   // Timed offline support
   // When status === 'offline' and offlineUntil is a future date, listing auto-restores to online at that time
   // When status === 'offline' and offlineUntil is null, vendor must manually toggle back online
@@ -65,6 +69,14 @@ const businessSchema = new mongoose.Schema({
       discount: { type: String }, // optional
       // For FOOD CATERER service types, this caps how many plates a user can order
       maxPlates: { type: Number, min: 1 },
+      // For PHOTOGRAPHER listings, optional tiered rates by hours
+      // Example: [{ hours: 2, charge: "4999" }, { hours: 4, charge: "8999" }]
+      rates: [
+        new mongoose.Schema({
+          hours: { type: Number, min: 1, required: true },
+          charge: { type: String, required: true },
+        }, { _id: false, id: false })
+      ],
       images: [String],           // array of image URLs
     }
   ]

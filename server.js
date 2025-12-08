@@ -5,10 +5,10 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-if (!process.env.FIREBASE_API_KEY) {
-  console.warn('[startup] WARNING: FIREBASE_API_KEY is missing. Phone OTP endpoints will return configuration error.');
+if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_VERIFY_SERVICE_SID) {
+  console.warn('[startup] WARNING: Twilio Verify env vars missing. Phone OTP endpoints will return configuration error.');
 } else {
-  console.log('[startup] Firebase API key loaded. Phone OTP endpoints enabled.');
+  console.log('[startup] Twilio Verify configured. Phone OTP endpoints enabled.');
 }
 if (!process.env.JWT_SECRET) {
   console.warn('[startup] WARNING: JWT_SECRET is missing. Token issuance/verification will fail.');
@@ -66,7 +66,7 @@ const isPublicRoute = (req) => {
     { method: 'POST', path: '/api/auth/verify-otp' },
     { method: 'POST', path: '/api/customer/auth/send-otp' },
     { method: 'POST', path: '/api/customer/auth/verify-otp' },
-    { method: 'POST', path: '/api/firebase/login' },
+    
   ];
  
   if (pub.some(r => r.method === req.method && req.path === r.path)) return true;
@@ -97,7 +97,7 @@ app.use('/api/cities', require('./routes/cityRoutes'));
 app.use("/api/business", require('./routes/business'));
 app.use('/api/customer', require('./routes/customer'));
 app.use('/api/customer/auth', require('./routes/customerAuth'));
-app.use('/api/firebase', require('./routes/firebaseAuth'));
+// Firebase login removed in favor of Twilio Verify OTP
 app.use('/api/users', require('./routes/users'));
 // Newly added vendor-related routes
 app.use('/api/listings', require('./routes/listings'));

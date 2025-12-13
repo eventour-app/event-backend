@@ -73,6 +73,7 @@ const businessSchema = new mongoose.Schema({
       serviceName: { type: String, required: true },
       price: { type: String, required: true },
       discount: { type: String }, // optional
+      description: { type: String, required: true }, // short description (max 200 chars)
       // For FOOD CATERER service types, this caps how many plates a user can order
       maxPlates: { type: Number, min: 1 },
       // For PHOTOGRAPHER listings, optional tiered rates by hours
@@ -84,6 +85,19 @@ const businessSchema = new mongoose.Schema({
         }, { _id: false, id: false })
       ],
       images: [String],           // array of image URLs
+      // Indicates if this service has sub-services
+      hasSubServices: { type: String, enum: ['yes', 'no'], default: 'no' },
+      // Sub-services (nested, same structure as service but without further nesting)
+      subServices: [
+        new mongoose.Schema({
+          serviceName: { type: String, required: true },
+          price: { type: String, required: true },
+          discount: { type: String },
+          description: { type: String, required: true },
+          maxPlates: { type: Number, min: 1 },
+          images: [String],
+        }, { _id: true, id: false })
+      ],
     }
   ]
   ,

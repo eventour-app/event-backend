@@ -93,7 +93,25 @@ router.all('/register', (req, res) =>
 //   documents?: { govtId?: string, registrationProof?: string, cancelledCheque?: string }, // data URLs/base64
 //   photos?: { ownerPhoto?: string, previewPhoto?: string }, // data URLs/base64
 //   services?: [
-//     { serviceName: string, price: string, discount?: string, maxPlates?: number, images?: string[] } // image data URLs/base64
+//     {
+//       serviceName: string,
+//       price: string,
+//       discount?: string,
+//       description?: string, // short description (max 200 chars)
+//       maxPlates?: number,
+//       images?: string[], // image data URLs/base64
+//       hasSubServices?: 'yes' | 'no', // enum indicating if sub-services exist
+//       subServices?: [ // only used when hasSubServices is 'yes'
+//         {
+//           serviceName: string,
+//           price: string,
+//           discount?: string,
+//           description?: string,
+//           maxPlates?: number,
+//           images?: string[]
+//         }
+//       ]
+//     }
 //   ]
 // }
 router.post('/onboard', async (req, res) => {
@@ -224,8 +242,11 @@ router.post('/onboard', async (req, res) => {
           serviceName: s.serviceName,
           price: s.price,
           discount: s.discount,
+          description: s.description,
           maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
           images: [],
+          hasSubServices: s.hasSubServices === 'yes' ? 'yes' : 'no',
+          subServices: [],
         };
         // Photographer-specific tiered rates (hours → charge)
         // Accept when listing serviceType includes "photographer" (case-insensitive)
@@ -257,6 +278,38 @@ router.post('/onboard', async (req, res) => {
               const normalized = normalizeIncomingImageUrl(img, req);
               if (normalized) item.images.push(normalized);
             }
+          }
+        }
+        // Handle sub-services if hasSubServices is 'yes'
+        if (item.hasSubServices === 'yes' && Array.isArray(s.subServices) && s.subServices.length) {
+          for (const sub of s.subServices) {
+            if (!sub || !sub.serviceName || !sub.price) continue;
+            const subItem = {
+              _id: new mongoose.Types.ObjectId(),
+              serviceName: sub.serviceName,
+              price: sub.price,
+              discount: sub.discount,
+              description: sub.description,
+              maxPlates: sub.maxPlates !== undefined ? Number(sub.maxPlates) : undefined,
+              images: [],
+            };
+            // Process sub-service images
+            if (Array.isArray(sub.images) && sub.images.length) {
+              for (const img of sub.images) {
+                if (typeof img !== 'string') continue;
+                if (img.startsWith('data:')) {
+                  const p = parseDataUrl(img);
+                  if (!p) continue;
+                  const processed = await processImage(p.buffer, 'service');
+                  const url = await saveBufferAsUpload(processed, 'service', req);
+                  subItem.images.push(url);
+                } else {
+                  const normalized = normalizeIncomingImageUrl(img, req);
+                  if (normalized) subItem.images.push(normalized);
+                }
+              }
+            }
+            item.subServices.push(subItem);
           }
         }
         normalizedServices.push(item);
@@ -646,8 +699,19 @@ router.post('/onboard-multipart',
         serviceName: s.serviceName,
         price: s.price,
         discount: s.discount,
+        description: s.description,
         maxPlates: s.maxPlates,
         images: s.images,
+        hasSubServices: s.hasSubServices || 'no',
+        subServices: (s.subServices || []).map(sub => ({
+          _id: sub._id,
+          serviceName: sub.serviceName,
+          price: sub.price,
+          discount: sub.discount,
+          description: sub.description,
+          maxPlates: sub.maxPlates,
+          images: sub.images,
+        })),
       }));
       res.json({ services });
     } catch (err) {
@@ -729,7 +793,7 @@ router.post('/onboard-multipart',
 
 // ---------------- Add Services to an existing listing ----------------
 // POST /api/business/:businessId/services
-// body: { services: [{ serviceName, price, discount?, images?: string[] (data URLs or URLs) }] }
+// body: { services: [{ serviceName, price, discount?, description?, images?: string[], hasSubServices?: 'yes'|'no', subServices?: [...] }] }
 router.post('/:businessId/services', async (req, res) => {
   try {
     const { businessId } = req.params;
@@ -748,8 +812,11 @@ router.post('/:businessId/services', async (req, res) => {
         serviceName: String(s.serviceName),
         price: String(s.price),
         discount: s.discount ? String(s.discount) : undefined,
+        description: s.description ? String(s.description) : undefined,
         maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
         images: [],
+        hasSubServices: s.hasSubServices === 'yes' ? 'yes' : 'no',
+        subServices: [],
       };
       if (Array.isArray(s.images) && s.images.length) {
         for (const img of s.images) {
@@ -762,6 +829,34 @@ router.post('/:businessId/services', async (req, res) => {
             // Accept plain URLs as-is
             item.images.push(img);
           }
+        }
+      }
+      // Handle sub-services if hasSubServices is 'yes'
+      if (item.hasSubServices === 'yes' && Array.isArray(s.subServices) && s.subServices.length) {
+        for (const sub of s.subServices) {
+          if (!sub || !sub.serviceName || !sub.price) continue;
+          const subItem = {
+            _id: new mongoose.Types.ObjectId(),
+            serviceName: String(sub.serviceName),
+            price: String(sub.price),
+            discount: sub.discount ? String(sub.discount) : undefined,
+            description: sub.description ? String(sub.description) : undefined,
+            maxPlates: sub.maxPlates !== undefined ? Number(sub.maxPlates) : undefined,
+            images: [],
+          };
+          if (Array.isArray(sub.images) && sub.images.length) {
+            for (const img of sub.images) {
+              if (typeof img === 'string' && img.startsWith('data:')) {
+                const p = parseDataUrl(img);
+                if (!p) continue;
+                const processed = await processImage(p.buffer, 'service');
+                subItem.images.push(toDataUrl(processed));
+              } else if (typeof img === 'string') {
+                subItem.images.push(img);
+              }
+            }
+          }
+          item.subServices.push(subItem);
         }
       }
       toAdd.push(item);
@@ -782,11 +877,11 @@ router.post('/:businessId/services', async (req, res) => {
 
 // Update a single service on a listing
 // PUT /api/business/:businessId/services/:serviceId
-// Body (any subset): { serviceName?, price?, discount?, maxPlates?, images?: string[] }
+// Body (any subset): { serviceName?, price?, discount?, description?, maxPlates?, images?: string[], hasSubServices?, subServices?: [...] }
 router.put('/:businessId/services/:serviceId', async (req, res) => {
   try {
     const { businessId, serviceId } = req.params;
-    const { serviceName, price, discount, maxPlates, images } = req.body || {};
+    const { serviceName, price, discount, description, maxPlates, images, hasSubServices, subServices } = req.body || {};
 
     const business = await Business.findById(businessId);
     if (!business) return res.status(404).json({ message: 'Business not found' });
@@ -797,10 +892,14 @@ router.put('/:businessId/services/:serviceId', async (req, res) => {
     if (serviceName !== undefined) svc.serviceName = String(serviceName);
     if (price !== undefined) svc.price = String(price);
     if (discount !== undefined) svc.discount = discount === null ? undefined : String(discount);
+    if (description !== undefined) svc.description = description === null ? undefined : String(description);
     if (maxPlates !== undefined) {
       const val = Number(maxPlates);
       if (!Number.isInteger(val) || val <= 0) return res.status(400).json({ message: 'maxPlates must be a positive integer' });
       svc.maxPlates = val;
+    }
+    if (hasSubServices !== undefined) {
+      svc.hasSubServices = hasSubServices === 'yes' ? 'yes' : 'no';
     }
 
     // If images are provided, replace the entire images array after normalizing
@@ -821,6 +920,41 @@ router.put('/:businessId/services/:serviceId', async (req, res) => {
         }
       }
       svc.images = out;
+    }
+
+    // Handle sub-services update - replace entire subServices array if provided
+    if (subServices !== undefined) {
+      if (!Array.isArray(subServices)) return res.status(400).json({ message: 'subServices must be an array' });
+      const processedSubs = [];
+      for (const sub of subServices) {
+        if (!sub || !sub.serviceName || !sub.price) continue;
+        const subItem = {
+          _id: sub._id ? new mongoose.Types.ObjectId(sub._id) : new mongoose.Types.ObjectId(),
+          serviceName: String(sub.serviceName),
+          price: String(sub.price),
+          discount: sub.discount ? String(sub.discount) : undefined,
+          description: sub.description ? String(sub.description) : undefined,
+          maxPlates: sub.maxPlates !== undefined ? Number(sub.maxPlates) : undefined,
+          images: [],
+        };
+        if (Array.isArray(sub.images) && sub.images.length) {
+          for (const img of sub.images) {
+            if (typeof img !== 'string') continue;
+            if (img.startsWith('data:')) {
+              const p = parseDataUrl(img);
+              if (!p) continue;
+              const processed = await processImage(p.buffer, 'service');
+              const url = await saveBufferAsUpload(processed, 'service', req);
+              subItem.images.push(url);
+            } else {
+              const normalized = normalizeIncomingImageUrl(img, req);
+              if (normalized) subItem.images.push(normalized);
+            }
+          }
+        }
+        processedSubs.push(subItem);
+      }
+      svc.subServices = processedSubs;
     }
 
     await business.save();
@@ -1708,8 +1842,27 @@ router.get('/vendor/:userId', async (req, res) => {
       ratingCount: business.ratingCount,
       createdAt: business.createdAt,
       
-      // Services and packages (if any exist from other sources)
-      services: business.services,
+      // Services with all fields explicitly mapped
+      services: (business.services || []).map(s => ({
+        _id: s._id,
+        serviceName: s.serviceName,
+        price: s.price,
+        discount: s.discount,
+        description: s.description,
+        maxPlates: s.maxPlates,
+        rates: s.rates,
+        images: s.images,
+        hasSubServices: s.hasSubServices || 'no',
+        subServices: (s.subServices || []).map(sub => ({
+          _id: sub._id,
+          serviceName: sub.serviceName,
+          price: sub.price,
+          discount: sub.discount,
+          description: sub.description,
+          maxPlates: sub.maxPlates,
+          images: sub.images,
+        })),
+      })),
       packages: business.packages,
     };
 

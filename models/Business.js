@@ -50,7 +50,13 @@ const businessSchema = new mongoose.Schema({
  
   status: { type: String, enum: ['online', 'offline'], default: 'offline', index: true },
   verificationStatus: { type: String, enum: ['draft', 'verified'], default: 'draft', index: true },
+  // Profile verification status - initially unverified, set to verified by admin
+  profileVerified: { type: Boolean, default: false, index: true },
   partnerContractAccepted: { type: Boolean, default: false },
+  // Agreement signing details
+  agreementSigned: { type: Boolean, default: false },
+  agreementSignedAt: { type: Date },
+  agreementSignature: { type: String }, // Base64 signature image or signature text
   isRegisteredBusiness: { type: Boolean, default: false },
   serviceDetail: { type: String },
   // Vendor specialization selections

@@ -1184,4 +1184,926 @@ router.get('/lookup/by-phone', async (req, res) => {
   }
 });
 
+// ========================================================================================
+// NEW VENDOR ONBOARDING APIs (5 Steps: Service Type, Business Info, Documents, Theme, Agreement)
+// ========================================================================================
+
+/**
+ * POST /api/business/vendor-onboard
+ * 
+ * Creates or updates vendor onboarding data with 5 steps:
+ * 1. Service Type
+ * 2. Business Info (contact, email, phone, whatsapp, full name, business name, gst, cin, aadhar, pan, 
+ *    minimum advance booking days, address details, working days, opening/closing time)
+ * 3. Business Details (all documents related to business - govtId, registrationProof, cancelledCheque, ownerPhoto, logo, previewPhoto)
+ * 4. Theme Selection (optional - themes array)
+ * 5. Agreement Signing (agreementSigned, agreementSignature)
+ * 
+ * Payload structure:
+ * {
+ *   businessId?: string,              // If provided, update existing; else create new
+ *   userId: string,                   // Required
+ *   
+ *   // Step 1: Service Type
+ *   serviceType: string,              // Required
+ *   
+ *   // Step 2: Business Info
+ *   businessInfo: {
+ *     ownerName: string,
+ *     businessName: string,
+ *     email: string,
+ *     phone: string,
+ *     whatsapp: string,
+ *     gstNumber: string,
+ *     cinNumber: string,
+ *     panNumber: string,
+ *     aadhaarNumber: string,
+ *     minBookingNoticeDays: number,
+ *     location: {
+ *       address: string,
+ *       street: string,
+ *       houseNo: string,
+ *       plotNo: string,
+ *       area: string,
+ *       landmark: string,
+ *       pincode: string,
+ *       state: string,
+ *       gps: string
+ *     },
+ *     workingDays: string[],
+ *     openingTime: string,
+ *     closingTime: string,
+ *     bankAccount: string,
+ *     ifscCode: string,
+ *     isRegisteredBusiness: boolean,
+ *     serviceDetail: string
+ *   },
+ *   
+ *   // Step 3: Business Details (Documents) - can be data URLs or base64 strings
+ *   documents: {
+ *     logo: string,
+ *     govtId: string,
+ *     registrationProof: string,
+ *     cancelledCheque: string,
+ *     ownerPhoto: string,
+ *     previewPhoto: string
+ *   },
+ *   
+ *   // Step 4: Theme Selection (optional)
+ *   themes: string[],
+ *   eventTypes: string[],
+ *   
+ *   // Step 5: Agreement Signing
+ *   agreementSigned: boolean,
+ *   agreementSignature: string        // Base64 signature image or text
+ * }
+ */
+router.post('/vendor-onboard', async (req, res) => {
+  try {
+    const {
+      businessId,
+      userId,
+      serviceType,
+      businessInfo = {},
+      documents = {},
+      themes = [],
+      eventTypes = [],
+      agreementSigned,
+      agreementSignature,
+    } = req.body || {};
+
+    // Validation
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
+    if (!serviceType) {
+      return res.status(400).json({ message: 'serviceType is required' });
+    }
+
+    // Get minBookingNoticeDays from businessInfo
+    const minBookingNoticeDays = businessInfo.minBookingNoticeDays;
+    
+    // Validate minBookingNoticeDays on create
+    if (!businessId) {
+      if (minBookingNoticeDays === undefined || minBookingNoticeDays === null) {
+        return res.status(400).json({ message: 'minBookingNoticeDays is required' });
+      }
+    }
+    if (minBookingNoticeDays !== undefined && minBookingNoticeDays !== null) {
+      const val = Number(minBookingNoticeDays);
+      if (!Number.isInteger(val) || val < 0) {
+        return res.status(400).json({ message: 'minBookingNoticeDays must be a whole number >= 0' });
+      }
+    }
+
+    let business = null;
+    if (businessId) {
+      business = await Business.findById(businessId);
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+    } else {
+      // Create new business - initially in draft state, profileVerified = false
+      business = new Business({
+        userId,
+        serviceType,
+        verificationStatus: 'draft',
+        status: 'offline',
+        profileVerified: false,
+      });
+    }
+
+    // Step 1: Service Type
+    business.serviceType = serviceType;
+    business.userId = userId;
+
+    // Step 2: Business Info
+    const businessInfoFields = [
+      'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
+      'workingDays', 'openingTime', 'closingTime',
+      'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
+      'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
+    ];
+    for (const field of businessInfoFields) {
+      if (businessInfo[field] !== undefined) {
+        business[field] = businessInfo[field];
+      }
+    }
+    if (businessInfo.location) {
+      business.location = businessInfo.location;
+    }
+    if (minBookingNoticeDays !== undefined && minBookingNoticeDays !== null) {
+      business.minBookingNoticeDays = Number(minBookingNoticeDays);
+    }
+
+    // Step 3: Business Details (Documents)
+    if (documents && typeof documents === 'object') {
+      // Logo
+      if (documents.logo) {
+        const parsed = parseDataUrl(documents.logo);
+        if (!parsed) return res.status(400).json({ message: 'Invalid logo format; expected data URL or base64 string' });
+        const processed = await processImage(parsed.buffer, 'logo');
+        business.logo = {
+          data: processed.buffer,
+          contentType: processed.mimeType,
+          sizeKb: processed.sizeKb,
+          width: processed.width,
+          height: processed.height,
+        };
+        business.logoUrl = await saveBufferAsUpload(processed, 'logo', req);
+      }
+
+      // Govt ID
+      if (documents.govtId) {
+        const parsed = parseDataUrl(documents.govtId);
+        if (!parsed) return res.status(400).json({ message: 'Invalid govtId format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.govtId = processed.buffer;
+        business.govtIdUrl = await saveBufferAsUpload(processed, 'govtId', req);
+      }
+
+      // Registration Proof
+      if (documents.registrationProof) {
+        const parsed = parseDataUrl(documents.registrationProof);
+        if (!parsed) return res.status(400).json({ message: 'Invalid registrationProof format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.registrationProof = processed.buffer;
+        business.registrationProofUrl = await saveBufferAsUpload(processed, 'registrationProof', req);
+      }
+
+      // Cancelled Cheque
+      if (documents.cancelledCheque) {
+        const parsed = parseDataUrl(documents.cancelledCheque);
+        if (!parsed) return res.status(400).json({ message: 'Invalid cancelledCheque format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.cancelledCheque = processed.buffer;
+        business.cancelledChequeUrl = await saveBufferAsUpload(processed, 'cancelledCheque', req);
+      }
+
+      // Owner Photo
+      if (documents.ownerPhoto) {
+        const parsed = parseDataUrl(documents.ownerPhoto);
+        if (!parsed) return res.status(400).json({ message: 'Invalid ownerPhoto format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.ownerPhoto = processed.buffer;
+        business.ownerPhotoUrl = await saveBufferAsUpload(processed, 'ownerPhoto', req);
+      }
+
+      // Preview Photo
+      if (documents.previewPhoto) {
+        const parsed = parseDataUrl(documents.previewPhoto);
+        if (!parsed) return res.status(400).json({ message: 'Invalid previewPhoto format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.previewPhoto = processed.buffer;
+        business.previewPhotoUrl = await saveBufferAsUpload(processed, 'previewPhoto', req);
+      }
+    }
+
+    // Step 4: Theme Selection (optional)
+    if (Array.isArray(themes) && themes.length > 0) {
+      business.themes = themes.filter(t => typeof t === 'string' && t.trim());
+    }
+    if (Array.isArray(eventTypes) && eventTypes.length > 0) {
+      business.eventTypes = eventTypes.filter(t => typeof t === 'string' && t.trim());
+    }
+
+    // Step 5: Agreement Signing
+    if (agreementSigned !== undefined) {
+      business.agreementSigned = !!agreementSigned;
+      if (agreementSigned) {
+        business.agreementSignedAt = new Date();
+        business.partnerContractAccepted = true;
+      }
+    }
+    if (agreementSignature !== undefined) {
+      business.agreementSignature = agreementSignature;
+    }
+
+    const saved = await business.save();
+
+    // Prepare response without Buffer data (return URLs only)
+    const response = saved.toObject();
+    delete response.logo;
+    delete response.govtId;
+    delete response.registrationProof;
+    delete response.cancelledCheque;
+    delete response.ownerPhoto;
+    delete response.previewPhoto;
+
+    res.status(businessId ? 200 : 201).json({
+      message: businessId ? 'Vendor onboarding updated' : 'Vendor onboarding created',
+      business: response,
+    });
+  } catch (err) {
+    console.error('Vendor onboard endpoint error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/business/vendor-onboard-multipart
+ * 
+ * Same as vendor-onboard but accepts multipart/form-data for file uploads
+ */
+router.post('/vendor-onboard-multipart',
+  upload.fields([
+    { name: 'logo', maxCount: 1 },
+    { name: 'govtId', maxCount: 1 },
+    { name: 'registrationProof', maxCount: 1 },
+    { name: 'cancelledCheque', maxCount: 1 },
+    { name: 'ownerPhoto', maxCount: 1 },
+    { name: 'previewPhoto', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const { businessId, userId, serviceType, agreementSigned, agreementSignature } = req.body || {};
+
+      if (!userId) {
+        return res.status(400).json({ message: 'userId is required' });
+      }
+      if (!serviceType) {
+        return res.status(400).json({ message: 'serviceType is required' });
+      }
+
+      // Parse JSON fields
+      let businessInfo = {};
+      let themes = [];
+      let eventTypes = [];
+
+      if (req.body.businessInfo) {
+        try {
+          businessInfo = JSON.parse(req.body.businessInfo);
+        } catch {
+          return res.status(400).json({ message: 'businessInfo must be valid JSON' });
+        }
+      }
+      if (req.body.themes) {
+        try {
+          themes = JSON.parse(req.body.themes);
+        } catch {
+          return res.status(400).json({ message: 'themes must be valid JSON array' });
+        }
+      }
+      if (req.body.eventTypes) {
+        try {
+          eventTypes = JSON.parse(req.body.eventTypes);
+        } catch {
+          return res.status(400).json({ message: 'eventTypes must be valid JSON array' });
+        }
+      }
+
+      // Get minBookingNoticeDays
+      let minBookingNoticeDays = req.body.minBookingNoticeDays;
+      if (minBookingNoticeDays === undefined || minBookingNoticeDays === null) {
+        minBookingNoticeDays = businessInfo.minBookingNoticeDays;
+      }
+
+      // Validate minBookingNoticeDays on create
+      if (!businessId) {
+        if (minBookingNoticeDays === undefined || minBookingNoticeDays === null) {
+          return res.status(400).json({ message: 'minBookingNoticeDays is required' });
+        }
+      }
+      if (minBookingNoticeDays !== undefined && minBookingNoticeDays !== null) {
+        const val = Number(minBookingNoticeDays);
+        if (!Number.isInteger(val) || val < 0) {
+          return res.status(400).json({ message: 'minBookingNoticeDays must be a whole number >= 0' });
+        }
+        minBookingNoticeDays = val;
+      }
+
+      let business = null;
+      if (businessId) {
+        business = await Business.findById(businessId);
+        if (!business) return res.status(404).json({ message: 'Business not found' });
+      } else {
+        business = new Business({
+          userId,
+          serviceType,
+          verificationStatus: 'draft',
+          status: 'offline',
+          profileVerified: false,
+        });
+      }
+
+      // Step 1: Service Type
+      business.serviceType = serviceType;
+      business.userId = userId;
+
+      // Step 2: Business Info
+      const businessInfoFields = [
+        'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
+        'workingDays', 'openingTime', 'closingTime',
+        'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
+        'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
+      ];
+      for (const field of businessInfoFields) {
+        if (businessInfo[field] !== undefined) {
+          business[field] = businessInfo[field];
+        }
+      }
+      if (businessInfo.location) {
+        business.location = businessInfo.location;
+      }
+      if (minBookingNoticeDays !== undefined) {
+        business.minBookingNoticeDays = minBookingNoticeDays;
+      }
+
+      // Step 3: Documents (from multipart files)
+      const baseUrl = getBaseUrl(req);
+      const fileUrl = (f) => `${baseUrl}/uploads/${path.basename(f.path)}`;
+
+      // Helper to process and downscale images on disk in-place
+      async function downscaleInPlace(filePath, kind) {
+        const image = sharp(filePath);
+        const sizes = { logo: 512, doc: 1600, photo: 1024 };
+        const max = sizes[kind] || 1600;
+        await image
+          .rotate()
+          .resize({ width: max, height: max, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toFile(`${filePath}.tmp`);
+        await fs.promises.rename(`${filePath}.tmp`, filePath);
+      }
+
+      const files = req.files || {};
+
+      if (files.logo?.[0]) {
+        await downscaleInPlace(files.logo[0].path, 'logo');
+        business.logoUrl = fileUrl(files.logo[0]);
+      }
+      if (files.govtId?.[0]) {
+        await downscaleInPlace(files.govtId[0].path, 'doc');
+        business.govtIdUrl = fileUrl(files.govtId[0]);
+      }
+      if (files.registrationProof?.[0]) {
+        await downscaleInPlace(files.registrationProof[0].path, 'doc');
+        business.registrationProofUrl = fileUrl(files.registrationProof[0]);
+      }
+      if (files.cancelledCheque?.[0]) {
+        await downscaleInPlace(files.cancelledCheque[0].path, 'doc');
+        business.cancelledChequeUrl = fileUrl(files.cancelledCheque[0]);
+      }
+      if (files.ownerPhoto?.[0]) {
+        await downscaleInPlace(files.ownerPhoto[0].path, 'photo');
+        business.ownerPhotoUrl = fileUrl(files.ownerPhoto[0]);
+      }
+      if (files.previewPhoto?.[0]) {
+        await downscaleInPlace(files.previewPhoto[0].path, 'photo');
+        business.previewPhotoUrl = fileUrl(files.previewPhoto[0]);
+      }
+
+      // Step 4: Theme Selection (optional)
+      if (Array.isArray(themes) && themes.length > 0) {
+        business.themes = themes.filter(t => typeof t === 'string' && t.trim());
+      }
+      if (Array.isArray(eventTypes) && eventTypes.length > 0) {
+        business.eventTypes = eventTypes.filter(t => typeof t === 'string' && t.trim());
+      }
+
+      // Step 5: Agreement Signing
+      if (agreementSigned !== undefined) {
+        business.agreementSigned = agreementSigned === 'true' || agreementSigned === true;
+        if (business.agreementSigned) {
+          business.agreementSignedAt = new Date();
+          business.partnerContractAccepted = true;
+        }
+      }
+      if (agreementSignature !== undefined) {
+        business.agreementSignature = agreementSignature;
+      }
+
+      const saved = await business.save();
+
+      // Prepare response without Buffer data
+      const response = saved.toObject();
+      delete response.logo;
+      delete response.govtId;
+      delete response.registrationProof;
+      delete response.cancelledCheque;
+      delete response.ownerPhoto;
+      delete response.previewPhoto;
+
+      res.status(businessId ? 200 : 201).json({
+        message: businessId ? 'Vendor onboarding updated' : 'Vendor onboarding created',
+        business: response,
+      });
+    } catch (err) {
+      console.error('Vendor onboard multipart error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+/**
+ * GET /api/business/vendor/:userId
+ * 
+ * Get all vendor/business details by user ID including document URLs
+ */
+router.get('/vendor/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
+
+    // Find business by userId
+    const business = await Business.findOne({ userId }).lean();
+
+    if (!business) {
+      return res.status(404).json({ message: 'Vendor not found for this user' });
+    }
+
+    // Remove binary buffer data, keep only URLs
+    const response = {
+      _id: business._id,
+      userId: business.userId,
+      
+      // Step 1: Service Type
+      serviceType: business.serviceType,
+      
+      // Step 2: Business Info
+      ownerName: business.ownerName,
+      businessName: business.businessName,
+      email: business.email,
+      phone: business.phone,
+      whatsapp: business.whatsapp,
+      gstNumber: business.gstNumber,
+      cinNumber: business.cinNumber,
+      panNumber: business.panNumber,
+      aadhaarNumber: business.aadhaarNumber,
+      minBookingNoticeDays: business.minBookingNoticeDays,
+      location: business.location,
+      workingDays: business.workingDays,
+      openingTime: business.openingTime,
+      closingTime: business.closingTime,
+      bankAccount: business.bankAccount,
+      ifscCode: business.ifscCode,
+      isRegisteredBusiness: business.isRegisteredBusiness,
+      serviceDetail: business.serviceDetail,
+      
+      // Step 3: Document URLs (no binary data)
+      logoUrl: business.logoUrl,
+      govtIdUrl: business.govtIdUrl,
+      registrationProofUrl: business.registrationProofUrl,
+      cancelledChequeUrl: business.cancelledChequeUrl,
+      ownerPhotoUrl: business.ownerPhotoUrl,
+      previewPhotoUrl: business.previewPhotoUrl,
+      
+      // Step 4: Themes
+      themes: business.themes,
+      eventTypes: business.eventTypes,
+      
+      // Step 5: Agreement
+      agreementSigned: business.agreementSigned,
+      agreementSignedAt: business.agreementSignedAt,
+      partnerContractAccepted: business.partnerContractAccepted,
+      
+      // Status fields
+      status: business.status,
+      verificationStatus: business.verificationStatus,
+      profileVerified: business.profileVerified,
+      
+      // Other fields
+      ratingAvg: business.ratingAvg,
+      ratingCount: business.ratingCount,
+      createdAt: business.createdAt,
+      
+      // Services and packages (if any exist from other sources)
+      services: business.services,
+      packages: business.packages,
+    };
+
+    res.json({
+      message: 'Vendor details retrieved successfully',
+      vendor: response,
+    });
+  } catch (err) {
+    console.error('Get vendor by userId error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/business/vendor/:userId
+ * 
+ * Update all vendor/business details by user ID including documents
+ * 
+ * Same payload structure as POST vendor-onboard but userId comes from URL
+ */
+router.put('/vendor/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const {
+      serviceType,
+      businessInfo = {},
+      documents = {},
+      themes,
+      eventTypes,
+      agreementSigned,
+      agreementSignature,
+    } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
+
+    // Find business by userId
+    const business = await Business.findOne({ userId });
+
+    if (!business) {
+      return res.status(404).json({ message: 'Vendor not found for this user' });
+    }
+
+    // Step 1: Service Type (if provided)
+    if (serviceType !== undefined) {
+      business.serviceType = serviceType;
+    }
+
+    // Step 2: Business Info
+    const businessInfoFields = [
+      'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
+      'workingDays', 'openingTime', 'closingTime',
+      'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
+      'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
+    ];
+    for (const field of businessInfoFields) {
+      if (businessInfo[field] !== undefined) {
+        business[field] = businessInfo[field];
+      }
+    }
+    if (businessInfo.location !== undefined) {
+      business.location = businessInfo.location;
+    }
+    if (businessInfo.minBookingNoticeDays !== undefined && businessInfo.minBookingNoticeDays !== null) {
+      const val = Number(businessInfo.minBookingNoticeDays);
+      if (!Number.isInteger(val) || val < 0) {
+        return res.status(400).json({ message: 'minBookingNoticeDays must be a whole number >= 0' });
+      }
+      business.minBookingNoticeDays = val;
+    }
+
+    // Step 3: Business Details (Documents)
+    if (documents && typeof documents === 'object') {
+      // Logo
+      if (documents.logo) {
+        const parsed = parseDataUrl(documents.logo);
+        if (!parsed) return res.status(400).json({ message: 'Invalid logo format; expected data URL or base64 string' });
+        const processed = await processImage(parsed.buffer, 'logo');
+        business.logo = {
+          data: processed.buffer,
+          contentType: processed.mimeType,
+          sizeKb: processed.sizeKb,
+          width: processed.width,
+          height: processed.height,
+        };
+        business.logoUrl = await saveBufferAsUpload(processed, 'logo', req);
+      }
+
+      // Govt ID
+      if (documents.govtId) {
+        const parsed = parseDataUrl(documents.govtId);
+        if (!parsed) return res.status(400).json({ message: 'Invalid govtId format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.govtId = processed.buffer;
+        business.govtIdUrl = await saveBufferAsUpload(processed, 'govtId', req);
+      }
+
+      // Registration Proof
+      if (documents.registrationProof) {
+        const parsed = parseDataUrl(documents.registrationProof);
+        if (!parsed) return res.status(400).json({ message: 'Invalid registrationProof format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.registrationProof = processed.buffer;
+        business.registrationProofUrl = await saveBufferAsUpload(processed, 'registrationProof', req);
+      }
+
+      // Cancelled Cheque
+      if (documents.cancelledCheque) {
+        const parsed = parseDataUrl(documents.cancelledCheque);
+        if (!parsed) return res.status(400).json({ message: 'Invalid cancelledCheque format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.cancelledCheque = processed.buffer;
+        business.cancelledChequeUrl = await saveBufferAsUpload(processed, 'cancelledCheque', req);
+      }
+
+      // Owner Photo
+      if (documents.ownerPhoto) {
+        const parsed = parseDataUrl(documents.ownerPhoto);
+        if (!parsed) return res.status(400).json({ message: 'Invalid ownerPhoto format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.ownerPhoto = processed.buffer;
+        business.ownerPhotoUrl = await saveBufferAsUpload(processed, 'ownerPhoto', req);
+      }
+
+      // Preview Photo
+      if (documents.previewPhoto) {
+        const parsed = parseDataUrl(documents.previewPhoto);
+        if (!parsed) return res.status(400).json({ message: 'Invalid previewPhoto format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.previewPhoto = processed.buffer;
+        business.previewPhotoUrl = await saveBufferAsUpload(processed, 'previewPhoto', req);
+      }
+    }
+
+    // Step 4: Theme Selection
+    if (themes !== undefined) {
+      if (Array.isArray(themes)) {
+        business.themes = themes.filter(t => typeof t === 'string' && t.trim());
+      } else {
+        business.themes = [];
+      }
+    }
+    if (eventTypes !== undefined) {
+      if (Array.isArray(eventTypes)) {
+        business.eventTypes = eventTypes.filter(t => typeof t === 'string' && t.trim());
+      } else {
+        business.eventTypes = [];
+      }
+    }
+
+    // Step 5: Agreement Signing
+    if (agreementSigned !== undefined) {
+      business.agreementSigned = !!agreementSigned;
+      if (agreementSigned && !business.agreementSignedAt) {
+        business.agreementSignedAt = new Date();
+        business.partnerContractAccepted = true;
+      }
+    }
+    if (agreementSignature !== undefined) {
+      business.agreementSignature = agreementSignature;
+    }
+
+    const saved = await business.save();
+
+    // Prepare response without Buffer data
+    const response = saved.toObject();
+    delete response.logo;
+    delete response.govtId;
+    delete response.registrationProof;
+    delete response.cancelledCheque;
+    delete response.ownerPhoto;
+    delete response.previewPhoto;
+
+    res.json({
+      message: 'Vendor details updated successfully',
+      vendor: response,
+    });
+  } catch (err) {
+    console.error('Update vendor by userId error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/business/vendor/:userId/multipart
+ * 
+ * Update vendor details with multipart/form-data for file uploads
+ */
+router.put('/vendor/:userId/multipart',
+  upload.fields([
+    { name: 'logo', maxCount: 1 },
+    { name: 'govtId', maxCount: 1 },
+    { name: 'registrationProof', maxCount: 1 },
+    { name: 'cancelledCheque', maxCount: 1 },
+    { name: 'ownerPhoto', maxCount: 1 },
+    { name: 'previewPhoto', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { serviceType, agreementSigned, agreementSignature } = req.body || {};
+
+      if (!userId) {
+        return res.status(400).json({ message: 'userId is required' });
+      }
+
+      // Find business by userId
+      const business = await Business.findOne({ userId });
+
+      if (!business) {
+        return res.status(404).json({ message: 'Vendor not found for this user' });
+      }
+
+      // Parse JSON fields
+      let businessInfo = {};
+      let themes = [];
+      let eventTypes = [];
+
+      if (req.body.businessInfo) {
+        try {
+          businessInfo = JSON.parse(req.body.businessInfo);
+        } catch {
+          return res.status(400).json({ message: 'businessInfo must be valid JSON' });
+        }
+      }
+      if (req.body.themes) {
+        try {
+          themes = JSON.parse(req.body.themes);
+        } catch {
+          return res.status(400).json({ message: 'themes must be valid JSON array' });
+        }
+      }
+      if (req.body.eventTypes) {
+        try {
+          eventTypes = JSON.parse(req.body.eventTypes);
+        } catch {
+          return res.status(400).json({ message: 'eventTypes must be valid JSON array' });
+        }
+      }
+
+      // Step 1: Service Type (if provided)
+      if (serviceType !== undefined) {
+        business.serviceType = serviceType;
+      }
+
+      // Step 2: Business Info
+      const businessInfoFields = [
+        'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
+        'workingDays', 'openingTime', 'closingTime',
+        'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
+        'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
+      ];
+      for (const field of businessInfoFields) {
+        if (businessInfo[field] !== undefined) {
+          business[field] = businessInfo[field];
+        }
+      }
+      if (businessInfo.location !== undefined) {
+        business.location = businessInfo.location;
+      }
+      if (businessInfo.minBookingNoticeDays !== undefined && businessInfo.minBookingNoticeDays !== null) {
+        const val = Number(businessInfo.minBookingNoticeDays);
+        if (!Number.isInteger(val) || val < 0) {
+          return res.status(400).json({ message: 'minBookingNoticeDays must be a whole number >= 0' });
+        }
+        business.minBookingNoticeDays = val;
+      }
+
+      // Step 3: Documents (from multipart files)
+      const baseUrl = getBaseUrl(req);
+      const fileUrl = (f) => `${baseUrl}/uploads/${path.basename(f.path)}`;
+
+      async function downscaleInPlace(filePath, kind) {
+        const image = sharp(filePath);
+        const sizes = { logo: 512, doc: 1600, photo: 1024 };
+        const max = sizes[kind] || 1600;
+        await image
+          .rotate()
+          .resize({ width: max, height: max, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toFile(`${filePath}.tmp`);
+        await fs.promises.rename(`${filePath}.tmp`, filePath);
+      }
+
+      const files = req.files || {};
+
+      if (files.logo?.[0]) {
+        await downscaleInPlace(files.logo[0].path, 'logo');
+        business.logoUrl = fileUrl(files.logo[0]);
+      }
+      if (files.govtId?.[0]) {
+        await downscaleInPlace(files.govtId[0].path, 'doc');
+        business.govtIdUrl = fileUrl(files.govtId[0]);
+      }
+      if (files.registrationProof?.[0]) {
+        await downscaleInPlace(files.registrationProof[0].path, 'doc');
+        business.registrationProofUrl = fileUrl(files.registrationProof[0]);
+      }
+      if (files.cancelledCheque?.[0]) {
+        await downscaleInPlace(files.cancelledCheque[0].path, 'doc');
+        business.cancelledChequeUrl = fileUrl(files.cancelledCheque[0]);
+      }
+      if (files.ownerPhoto?.[0]) {
+        await downscaleInPlace(files.ownerPhoto[0].path, 'photo');
+        business.ownerPhotoUrl = fileUrl(files.ownerPhoto[0]);
+      }
+      if (files.previewPhoto?.[0]) {
+        await downscaleInPlace(files.previewPhoto[0].path, 'photo');
+        business.previewPhotoUrl = fileUrl(files.previewPhoto[0]);
+      }
+
+      // Step 4: Theme Selection
+      if (themes.length > 0 || req.body.themes) {
+        business.themes = themes.filter(t => typeof t === 'string' && t.trim());
+      }
+      if (eventTypes.length > 0 || req.body.eventTypes) {
+        business.eventTypes = eventTypes.filter(t => typeof t === 'string' && t.trim());
+      }
+
+      // Step 5: Agreement Signing
+      if (agreementSigned !== undefined) {
+        business.agreementSigned = agreementSigned === 'true' || agreementSigned === true;
+        if (business.agreementSigned && !business.agreementSignedAt) {
+          business.agreementSignedAt = new Date();
+          business.partnerContractAccepted = true;
+        }
+      }
+      if (agreementSignature !== undefined) {
+        business.agreementSignature = agreementSignature;
+      }
+
+      const saved = await business.save();
+
+      // Prepare response without Buffer data
+      const response = saved.toObject();
+      delete response.logo;
+      delete response.govtId;
+      delete response.registrationProof;
+      delete response.cancelledCheque;
+      delete response.ownerPhoto;
+      delete response.previewPhoto;
+
+      res.json({
+        message: 'Vendor details updated successfully',
+        vendor: response,
+      });
+    } catch (err) {
+      console.error('Update vendor multipart error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+/**
+ * PATCH /api/business/vendor/:userId/verify
+ * 
+ * Admin endpoint to set vendor profile as verified
+ */
+router.patch('/vendor/:userId/verify', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { verified } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
+
+    const business = await Business.findOne({ userId });
+
+    if (!business) {
+      return res.status(404).json({ message: 'Vendor not found for this user' });
+    }
+
+    business.profileVerified = verified !== undefined ? !!verified : true;
+    
+    // If verified, also update status to make listing live
+    if (business.profileVerified) {
+      business.verificationStatus = 'verified';
+      business.status = 'online';
+    }
+
+    await business.save();
+
+    res.json({
+      message: business.profileVerified ? 'Vendor verified successfully' : 'Vendor verification status updated',
+      profileVerified: business.profileVerified,
+      verificationStatus: business.verificationStatus,
+      status: business.status,
+    });
+  } catch (err) {
+    console.error('Verify vendor error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

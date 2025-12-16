@@ -3,7 +3,7 @@ const router = express.Router();
 const User = require('../models/user');
 const Business = require('../models/Business');
 const { generateVendorCode } = require('../utils/vendorCode');
-const { THEMES, EVENT_TYPES } = require('../utils/vendorSpecializations');
+const { THEMES, EVENT_TYPES, SERVICE_LOCATIONS } = require('../utils/vendorSpecializations');
 
 function err(res, status, message, code, details) { return res.status(status).json({ error: true, message, code, ...(details?{details}:{}) }); }
 
@@ -201,6 +201,17 @@ router.get('/specializations-options', (req, res) => {
   } catch (e) {
     console.error('specializations-options error', e);
     err(res, 500, 'Failed to load options', 'SERVER_ERROR');
+  }
+});
+
+// GET /api/vendor-mobile/service-locations-options
+// Returns fixed list of service location options for vendors
+router.get('/service-locations-options', (req, res) => {
+  try {
+    res.json({ serviceLocations: SERVICE_LOCATIONS });
+  } catch (e) {
+    console.error('service-locations-options error', e);
+    err(res, 500, 'Failed to load service locations', 'SERVER_ERROR');
   }
 });
 

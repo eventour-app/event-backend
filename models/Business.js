@@ -85,6 +85,9 @@ const businessSchema = new mongoose.Schema({
         }, { _id: false, id: false })
       ],
       images: [String],           // array of image URLs
+      // Service locations - where the vendor can provide this service
+      // Options: Terrace, Car boot, Living room, Cabinet, Lawn, Backyard, Apartment
+      serviceLocations: [{ type: String }],
       // Indicates if this service has sub-services
       hasSubServices: { type: String, enum: ['yes', 'no'], default: 'no' },
       // Sub-services (nested, same structure as service but without further nesting)

@@ -30,4 +30,16 @@ const EVENT_TYPES = [
   'Government, Political & National Events',
 ];
 
-module.exports = { THEMES, EVENT_TYPES };
+// Fixed options for service locations (where vendors provide their services)
+// Vendors can select multiple options for each service
+const SERVICE_LOCATIONS = [
+  'Terrace',
+  'Car boot',
+  'Living room',
+  'Cabinet',
+  'Lawn',
+  'Backyard',
+  'Apartment',
+];
+
+module.exports = { THEMES, EVENT_TYPES, SERVICE_LOCATIONS };

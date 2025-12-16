@@ -100,6 +100,7 @@ router.all('/register', (req, res) =>
 //       description?: string, // short description (max 200 chars)
 //       maxPlates?: number,
 //       images?: string[], // image data URLs/base64
+//       serviceLocations?: string[], // where service is provided: Terrace, Car boot, Living room, Cabinet, Lawn, Backyard, Apartment
 //       hasSubServices?: 'yes' | 'no', // enum indicating if sub-services exist
 //       subServices?: [ // only used when hasSubServices is 'yes'
 //         {
@@ -245,6 +246,7 @@ router.post('/onboard', async (req, res) => {
           description: s.description,
           maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
           images: [],
+          serviceLocations: Array.isArray(s.serviceLocations) ? s.serviceLocations.map(String) : [],
           hasSubServices: s.hasSubServices === 'yes' ? 'yes' : 'no',
           subServices: [],
         };
@@ -793,7 +795,7 @@ router.post('/onboard-multipart',
 
 // ---------------- Add Services to an existing listing ----------------
 // POST /api/business/:businessId/services
-// body: { services: [{ serviceName, price, discount?, description?, images?: string[], hasSubServices?: 'yes'|'no', subServices?: [...] }] }
+// body: { services: [{ serviceName, price, discount?, description?, images?: string[], serviceLocations?: string[], hasSubServices?: 'yes'|'no', subServices?: [...] }] }
 router.post('/:businessId/services', async (req, res) => {
   try {
     const { businessId } = req.params;
@@ -815,6 +817,7 @@ router.post('/:businessId/services', async (req, res) => {
         description: s.description ? String(s.description) : undefined,
         maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
         images: [],
+        serviceLocations: Array.isArray(s.serviceLocations) ? s.serviceLocations.map(String) : [],
         hasSubServices: s.hasSubServices === 'yes' ? 'yes' : 'no',
         subServices: [],
       };
@@ -877,11 +880,11 @@ router.post('/:businessId/services', async (req, res) => {
 
 // Update a single service on a listing
 // PUT /api/business/:businessId/services/:serviceId
-// Body (any subset): { serviceName?, price?, discount?, description?, maxPlates?, images?: string[], hasSubServices?, subServices?: [...] }
+// Body (any subset): { serviceName?, price?, discount?, description?, maxPlates?, images?: string[], serviceLocations?: string[], hasSubServices?, subServices?: [...] }
 router.put('/:businessId/services/:serviceId', async (req, res) => {
   try {
     const { businessId, serviceId } = req.params;
-    const { serviceName, price, discount, description, maxPlates, images, hasSubServices, subServices } = req.body || {};
+    const { serviceName, price, discount, description, maxPlates, images, serviceLocations, hasSubServices, subServices } = req.body || {};
 
     const business = await Business.findById(businessId);
     if (!business) return res.status(404).json({ message: 'Business not found' });
@@ -900,6 +903,11 @@ router.put('/:businessId/services/:serviceId', async (req, res) => {
     }
     if (hasSubServices !== undefined) {
       svc.hasSubServices = hasSubServices === 'yes' ? 'yes' : 'no';
+    }
+    // Handle serviceLocations - replace entire array if provided
+    if (serviceLocations !== undefined) {
+      if (!Array.isArray(serviceLocations)) return res.status(400).json({ message: 'serviceLocations must be an array of strings' });
+      svc.serviceLocations = serviceLocations.map(String);
     }
 
     // If images are provided, replace the entire images array after normalizing

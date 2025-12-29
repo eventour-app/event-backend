@@ -5,10 +5,10 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_VERIFY_SERVICE_SID) {
-  console.warn('[startup] WARNING: Twilio Verify env vars missing. Phone OTP endpoints will return configuration error.');
+if (!process.env.FIREBASE_API_KEY) {
+  console.warn('[startup] WARNING: FIREBASE_API_KEY env var missing. Phone OTP endpoints will return configuration error.');
 } else {
-  console.log('[startup] Twilio Verify configured. Phone OTP endpoints enabled.');
+  console.log('[startup] Firebase Phone Auth configured. Phone OTP endpoints enabled.');
 }
 if (!process.env.JWT_SECRET) {
   console.warn('[startup] WARNING: JWT_SECRET is missing. Token issuance/verification will fail.');

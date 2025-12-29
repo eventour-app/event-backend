@@ -345,6 +345,11 @@ function mapOrder(o) {
     location: o.location || o.venue || null,
     venue: o.venue || o.location || null,
     notes: o.notes || null,
+    // Cancellation details
+    cancellationReason: o.cancellationReason || null,
+    cancellationNote: o.cancellationNote || null,
+    cancelledBy: o.cancelledBy || null,
+    cancelledAt: o.cancelledAt || null,
   };
 }
 
@@ -472,6 +477,7 @@ router.get('/orders/:orderId', async (req, res) => {
 });
 
 // PUT /api/customer/orders/:orderId/cancel - customer cancels pending/accepted
+// Body: { reason?: string, note?: string }
 router.put('/orders/:orderId/cancel', async (req, res) => {
   try {
     const auth = req.headers.authorization || '';
@@ -490,8 +496,26 @@ router.put('/orders/:orderId/cancel', async (req, res) => {
     if (!['pending','accepted','upcoming'].includes(order.status)) {
       return res.status(400).json({ message: 'Only pending/accepted/upcoming orders can be cancelled' });
     }
+    
+    // Get cancellation reason from body
+    const { reason, note } = req.body || {};
+    
     order.status = 'cancelled';
-    order.messages.push({ senderRole: 'customer', body: 'Order cancelled by customer' });
+    
+    // Store cancellation reason if provided
+    if (reason) {
+      order.cancellationReason = reason;
+      order.cancellationNote = note || null;
+      order.cancelledBy = 'customer';
+      order.cancelledAt = new Date();
+      const reasonText = note ? `${reason}: ${note}` : reason;
+      order.messages.push({ senderRole: 'customer', body: `Order cancelled by customer. Reason: ${reasonText}` });
+    } else {
+      order.cancelledBy = 'customer';
+      order.cancelledAt = new Date();
+      order.messages.push({ senderRole: 'customer', body: 'Order cancelled by customer' });
+    }
+    
     await order.save();
     // Mark any pending booking transaction as failed/cancelled
     await Transaction.updateMany({ orderId: order._id, type: 'booking', status: { $in: ['pending','processing'] } }, { $set: { status: 'failed' } });

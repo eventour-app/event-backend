@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
 const { processImage, toDataUrl } = require('../utils/imageProcessor');
+const { THEMES, EVENT_TYPES, SERVICE_LOCATIONS, PANDIT_LANGUAGES, PANDIT_SERVICES } = require('../utils/vendorSpecializations');
 const uploadsRoot = path.join(__dirname, '..', 'uploads');
 const upload = multer({ storage: multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsRoot),
@@ -73,6 +74,17 @@ router.all('/register', (req, res) =>
   res.status(410).json({ message: 'Deprecated. Use POST /api/business/onboard' })
 );
 
+// GET /api/business/options
+router.get('/options', (req, res) => {
+  res.json({
+    themes: THEMES,
+    eventTypes: EVENT_TYPES,
+    serviceLocations: SERVICE_LOCATIONS,
+    panditLanguages: PANDIT_LANGUAGES,
+    panditServices: PANDIT_SERVICES,
+  });
+});
+
 // NEW: Single consolidated onboarding endpoint accepting nested JSON
 // POST /api/business/onboard
 // Expected payload shape:
@@ -87,7 +99,10 @@ router.all('/register', (req, res) =>
 //     gstNumber, cinNumber, panNumber, aadhaarNumber,
 //     bankAccount, ifscCode,
 //     isRegisteredBusiness?: boolean,
-//     serviceDetail?: string
+//     serviceDetail?: string,
+//     themes?: string[], // for non-Pandit
+//     eventTypes?: string[], // for non-Pandit
+//     languages?: string[] // for Pandit
 //   },
 //   logo?: string, // data URL or base64
 //   documents?: { govtId?: string, registrationProof?: string, cancelledCheque?: string }, // data URLs/base64
@@ -168,7 +183,8 @@ router.post('/onboard', async (req, res) => {
     const fields = [
       'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
       'workingDays', 'openingTime', 'closingTime', 'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
-      'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
+      'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail',
+      'themes', 'eventTypes', 'languages'
     ];
     for (const f of fields) if (businessInfo[f] !== undefined) basic[f] = businessInfo[f];
   if (businessInfo.location) basic.location = businessInfo.location;
@@ -176,6 +192,15 @@ router.post('/onboard', async (req, res) => {
     basic.serviceType = serviceType; // ensure stored
     business.set(basic);
   if (effectiveMinBooking !== undefined && effectiveMinBooking !== null) business.minBookingNoticeDays = Number(effectiveMinBooking);
+
+    // Validation for Pandit service type
+    if (serviceType === 'Pandit') {
+      if (!basic.gstNumber) return res.status(400).json({ message: 'GST Number is required for Pandit service type' });
+      if (!basic.cinNumber) return res.status(400).json({ message: 'CIN Number is required for Pandit service type' });
+      if (!businessInfo.languages || !Array.isArray(businessInfo.languages) || businessInfo.languages.length === 0) {
+        return res.status(400).json({ message: 'At least one language must be selected for Pandit service type' });
+      }
+    }
 
     if (logo) {
       const parsed = parseDataUrl(logo);
@@ -702,12 +727,21 @@ router.post('/onboard-multipart',
         price: s.price,
         discount: s.discount,
         description: s.description,
+        // Pandit-specific fields at service level
+        type: s.type,
+        subtype: s.subtype,
+        hours: s.hours,
+        // Other vendor fields
         maxPlates: s.maxPlates,
+        serviceLocations: s.serviceLocations,
         images: s.images,
         hasSubServices: s.hasSubServices || 'no',
         subServices: (s.subServices || []).map(sub => ({
           _id: sub._id,
           serviceName: sub.serviceName,
+          // Pandit-specific fields for subServices
+          subtype: sub.subtype,
+          hours: sub.hours,
           price: sub.price,
           discount: sub.discount,
           description: sub.description,
@@ -715,7 +749,7 @@ router.post('/onboard-multipart',
           images: sub.images,
         })),
       }));
-      res.json({ services });
+      res.json({ services, serviceType: business.serviceType });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -795,7 +829,8 @@ router.post('/onboard-multipart',
 
 // ---------------- Add Services to an existing listing ----------------
 // POST /api/business/:businessId/services
-// body: { services: [{ serviceName, price, discount?, description?, images?: string[], serviceLocations?: string[], hasSubServices?: 'yes'|'no', subServices?: [...] }] }
+// body: { services: [{ serviceName, price?, discount?, description?, images?: string[], serviceLocations?: string[], hasSubServices?: 'yes'|'no', subServices?: [...] }] }
+// For Pandit vendors: serviceName = category, subServices[] with subtype, hours, price, description
 router.post('/:businessId/services', async (req, res) => {
   try {
     const { businessId } = req.params;
@@ -806,19 +841,36 @@ router.post('/:businessId/services', async (req, res) => {
     const business = await Business.findById(businessId);
     if (!business) return res.status(404).json({ message: 'Business not found' });
 
+    const isPandit = business.serviceType === 'Pandit';
+
     const toAdd = [];
     for (const s of services) {
-      if (!s || !s.serviceName || !s.price) continue;
+      if (!s || !s.serviceName) continue;
+      // For Pandit: price at service level is optional (calculated from subServices)
+      // For other vendors: price is required
+      if (!isPandit && !s.price) continue;
+
+      // For Pandit, always set hasSubServices to 'yes'
+      const hasSubServices = isPandit ? 'yes' : (s.hasSubServices === 'yes' ? 'yes' : 'no');
+
+      // Calculate price from subServices for Pandit if not provided
+      let servicePrice = s.price ? String(s.price) : undefined;
+      if (isPandit && !servicePrice && Array.isArray(s.subServices) && s.subServices.length) {
+        const prices = s.subServices.map(sub => parseFloat(sub.price) || 0).filter(p => p > 0);
+        if (prices.length) servicePrice = String(Math.min(...prices));
+      }
+      if (!servicePrice) servicePrice = '0'; // fallback
+
       const item = {
         _id: new mongoose.Types.ObjectId(),
         serviceName: String(s.serviceName),
-        price: String(s.price),
+        price: servicePrice,
         discount: s.discount ? String(s.discount) : undefined,
         description: s.description ? String(s.description) : undefined,
         maxPlates: s.maxPlates !== undefined ? Number(s.maxPlates) : undefined,
         images: [],
         serviceLocations: Array.isArray(s.serviceLocations) ? s.serviceLocations.map(String) : [],
-        hasSubServices: s.hasSubServices === 'yes' ? 'yes' : 'no',
+        hasSubServices: hasSubServices,
         subServices: [],
       };
       if (Array.isArray(s.images) && s.images.length) {
@@ -837,10 +889,15 @@ router.post('/:businessId/services', async (req, res) => {
       // Handle sub-services if hasSubServices is 'yes'
       if (item.hasSubServices === 'yes' && Array.isArray(s.subServices) && s.subServices.length) {
         for (const sub of s.subServices) {
-          if (!sub || !sub.serviceName || !sub.price) continue;
+          if (!sub || !sub.price) continue;
+          // For Pandit: use subtype as serviceName if serviceName not provided
+          const subServiceName = sub.serviceName || sub.subtype || '';
+          if (!subServiceName) continue;
           const subItem = {
             _id: new mongoose.Types.ObjectId(),
-            serviceName: String(sub.serviceName),
+            serviceName: String(subServiceName),
+            subtype: sub.subtype ? String(sub.subtype) : undefined,
+            hours: sub.hours !== undefined ? Number(sub.hours) : undefined,
             price: String(sub.price),
             discount: sub.discount ? String(sub.discount) : undefined,
             description: sub.description ? String(sub.description) : undefined,
@@ -880,11 +937,11 @@ router.post('/:businessId/services', async (req, res) => {
 
 // Update a single service on a listing
 // PUT /api/business/:businessId/services/:serviceId
-// Body (any subset): { serviceName?, price?, discount?, description?, maxPlates?, images?: string[], serviceLocations?: string[], hasSubServices?, subServices?: [...] }
+// Body (any subset): { serviceName?, price?, discount?, description?, type?, subtype?, hours?, maxPlates?, images?: string[], serviceLocations?: string[], hasSubServices?, subServices?: [...] }
 router.put('/:businessId/services/:serviceId', async (req, res) => {
   try {
     const { businessId, serviceId } = req.params;
-    const { serviceName, price, discount, description, maxPlates, images, serviceLocations, hasSubServices, subServices } = req.body || {};
+    const { serviceName, price, discount, description, type, subtype, hours, maxPlates, images, serviceLocations, hasSubServices, subServices } = req.body || {};
 
     const business = await Business.findById(businessId);
     if (!business) return res.status(404).json({ message: 'Business not found' });
@@ -896,6 +953,10 @@ router.put('/:businessId/services/:serviceId', async (req, res) => {
     if (price !== undefined) svc.price = String(price);
     if (discount !== undefined) svc.discount = discount === null ? undefined : String(discount);
     if (description !== undefined) svc.description = description === null ? undefined : String(description);
+    // Pandit-specific fields
+    if (type !== undefined) svc.type = type === null ? undefined : String(type);
+    if (subtype !== undefined) svc.subtype = subtype === null ? undefined : String(subtype);
+    if (hours !== undefined) svc.hours = hours === null ? undefined : Number(hours);
     if (maxPlates !== undefined) {
       const val = Number(maxPlates);
       if (!Number.isInteger(val) || val <= 0) return res.status(400).json({ message: 'maxPlates must be a positive integer' });
@@ -933,12 +994,18 @@ router.put('/:businessId/services/:serviceId', async (req, res) => {
     // Handle sub-services update - replace entire subServices array if provided
     if (subServices !== undefined) {
       if (!Array.isArray(subServices)) return res.status(400).json({ message: 'subServices must be an array' });
+      const isPandit = business.serviceType === 'Pandit';
       const processedSubs = [];
       for (const sub of subServices) {
-        if (!sub || !sub.serviceName || !sub.price) continue;
+        // For Pandit: use subtype as serviceName if serviceName not provided
+        const subServiceName = sub.serviceName || sub.subtype || '';
+        if (!sub || !subServiceName || !sub.price) continue;
         const subItem = {
           _id: sub._id ? new mongoose.Types.ObjectId(sub._id) : new mongoose.Types.ObjectId(),
-          serviceName: String(sub.serviceName),
+          serviceName: String(subServiceName),
+          // Pandit-specific fields
+          subtype: sub.subtype ? String(sub.subtype) : undefined,
+          hours: sub.hours !== undefined ? Number(sub.hours) : undefined,
           price: String(sub.price),
           discount: sub.discount ? String(sub.discount) : undefined,
           description: sub.description ? String(sub.description) : undefined,
@@ -1007,6 +1074,95 @@ router.delete('/:businessId/services/:serviceId', async (req, res) => {
     return res.json({ message: 'Service deleted', packagesAffected, packagesRemoved });
   } catch (err) {
     console.error('delete service error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a single sub-service from a service (useful for Pandit)
+// DELETE /api/business/:businessId/services/:serviceId/subservices/:subServiceId
+router.delete('/:businessId/services/:serviceId/subservices/:subServiceId', async (req, res) => {
+  try {
+    const { businessId, serviceId, subServiceId } = req.params;
+    const business = await Business.findById(businessId);
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+
+    const svc = (business.services || []).find(s => String(s._id) === String(serviceId));
+    if (!svc) return res.status(404).json({ message: 'Service not found' });
+
+    const beforeCount = (svc.subServices || []).length;
+    svc.subServices = (svc.subServices || []).filter(sub => String(sub._id) !== String(subServiceId));
+    const removed = beforeCount - svc.subServices.length;
+    if (!removed) return res.status(404).json({ message: 'SubService not found' });
+
+    // Update parent service price to min of remaining subServices
+    if (svc.subServices.length > 0) {
+      const prices = svc.subServices.map(s => parseFloat(s.price) || 0).filter(p => p > 0);
+      if (prices.length) svc.price = String(Math.min(...prices));
+    }
+
+    await business.save();
+    return res.json({ message: 'SubService deleted', remainingSubServices: svc.subServices.length });
+  } catch (err) {
+    console.error('delete subservice error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Update a single sub-service within a service (useful for Pandit)
+// PUT /api/business/:businessId/services/:serviceId/subservices/:subServiceId
+// Body: { subtype?, hours?, price?, description?, discount?, images? }
+router.put('/:businessId/services/:serviceId/subservices/:subServiceId', async (req, res) => {
+  try {
+    const { businessId, serviceId, subServiceId } = req.params;
+    const { subtype, hours, price, description, discount, images } = req.body || {};
+
+    const business = await Business.findById(businessId);
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+
+    const svc = (business.services || []).find(s => String(s._id) === String(serviceId));
+    if (!svc) return res.status(404).json({ message: 'Service not found' });
+
+    const subSvc = (svc.subServices || []).find(sub => String(sub._id) === String(subServiceId));
+    if (!subSvc) return res.status(404).json({ message: 'SubService not found' });
+
+    // Update fields
+    if (subtype !== undefined) {
+      subSvc.subtype = subtype === null ? undefined : String(subtype);
+      subSvc.serviceName = String(subtype); // Keep serviceName in sync with subtype
+    }
+    if (hours !== undefined) subSvc.hours = hours === null ? undefined : Number(hours);
+    if (price !== undefined) subSvc.price = String(price);
+    if (description !== undefined) subSvc.description = description === null ? undefined : String(description);
+    if (discount !== undefined) subSvc.discount = discount === null ? undefined : String(discount);
+
+    // Handle images
+    if (images !== undefined) {
+      if (!Array.isArray(images)) return res.status(400).json({ message: 'images must be an array' });
+      const out = [];
+      for (const img of images) {
+        if (typeof img !== 'string') continue;
+        if (img.startsWith('data:')) {
+          const p = parseDataUrl(img);
+          if (!p) continue;
+          const processed = await processImage(p.buffer, 'service');
+          const url = await saveBufferAsUpload(processed, 'service', req);
+          out.push(url);
+        } else {
+          const normalized = normalizeIncomingImageUrl(img, req);
+          if (normalized) out.push(normalized);
+        }
+      }
+      subSvc.images = out;
+    }
+
+    // Update parent service price to min of all subServices
+    const prices = svc.subServices.map(s => parseFloat(s.price) || 0).filter(p => p > 0);
+    if (prices.length) svc.price = String(Math.min(...prices));
+
+    await business.save();
+    return res.json({ message: 'SubService updated', subService: subSvc });
+  } catch (err) {
+    console.error('update subservice error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1337,9 +1493,11 @@ router.get('/lookup/by-phone', async (req, res) => {
  * 1. Service Type
  * 2. Business Info (contact, email, phone, whatsapp, full name, business name, gst, cin, aadhar, pan, 
  *    minimum advance booking days, address details, working days, opening/closing time)
- * 3. Business Details (all documents related to business - govtId, registrationProof, cancelledCheque, ownerPhoto, logo, previewPhoto)
+ * 3. Business Details (documents - govtId, registrationProof, cancelledCheque, ownerPhoto, logo, previewPhoto)
  * 4. Theme Selection (optional - themes array)
  * 5. Agreement Signing (agreementSigned, agreementSignature)
+ * 
+ * NOTE: For banquet/venue-specific details, use POST /api/business/banquet-service
  * 
  * Payload structure:
  * {
@@ -1391,9 +1549,12 @@ router.get('/lookup/by-phone', async (req, res) => {
  *     previewPhoto: string
  *   },
  *   
- *   // Step 4: Theme Selection (optional)
+ *   // Step 4: Theme Selection (optional, not for Pandit)
  *   themes: string[],
  *   eventTypes: string[],
+ *   
+ *   // Step 4 (For Pandit only): Language Preferences
+ *   languages: string[],              // Required for Pandit - e.g., ['Hindi', 'Tamil', 'Sanskrit']
  *   
  *   // Step 5: Agreement Signing
  *   agreementSigned: boolean,
@@ -1410,6 +1571,7 @@ router.post('/vendor-onboard', async (req, res) => {
       documents = {},
       themes = [],
       eventTypes = [],
+      languages = [],
       agreementSigned,
       agreementSignature,
     } = req.body || {};
@@ -1461,7 +1623,7 @@ router.post('/vendor-onboard', async (req, res) => {
     const businessInfoFields = [
       'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
       'workingDays', 'openingTime', 'closingTime',
-      'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
+      'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber', 'businessType',
       'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
     ];
     for (const field of businessInfoFields) {
@@ -1539,12 +1701,24 @@ router.post('/vendor-onboard', async (req, res) => {
       }
     }
 
-    // Step 4: Theme Selection (optional)
-    if (Array.isArray(themes) && themes.length > 0) {
-      business.themes = themes.filter(t => typeof t === 'string' && t.trim());
+    // Step 4: Theme Selection (optional - not for Pandit)
+    if (serviceType !== 'Pandit') {
+      if (Array.isArray(themes) && themes.length > 0) {
+        business.themes = themes.filter(t => typeof t === 'string' && t.trim());
+      }
+      if (Array.isArray(eventTypes) && eventTypes.length > 0) {
+        business.eventTypes = eventTypes.filter(t => typeof t === 'string' && t.trim());
+      }
     }
-    if (Array.isArray(eventTypes) && eventTypes.length > 0) {
-      business.eventTypes = eventTypes.filter(t => typeof t === 'string' && t.trim());
+
+    // Step 4 (For Pandit): Language Preferences
+    if (serviceType === 'Pandit') {
+      if (Array.isArray(languages) && languages.length > 0) {
+        business.languages = languages.filter(l => typeof l === 'string' && l.trim());
+      } else if (!businessId) {
+        // Languages required for new Pandit registrations
+        return res.status(400).json({ message: 'languages are required for Pandit service type' });
+      }
     }
 
     // Step 5: Agreement Signing
@@ -1580,10 +1754,354 @@ router.post('/vendor-onboard', async (req, res) => {
   }
 });
 
+// ========================================================================================
+// BANQUET/VENUE SERVICE API - For venue-specific details
+// ========================================================================================
+
+/**
+ * POST /api/business/banquet-service
+ * 
+ * Creates or updates banquet/venue-specific service details for an existing business.
+ * This endpoint is specifically for Banquet Hall, Wedding Venue, Party Hall vendors.
+ * 
+ * Prerequisites: Business must already exist (created via vendor-onboard)
+ * 
+ * Payload structure:
+ * {
+ *   businessId: string,               // Required - the existing business ID
+ *   
+ *   // Property Details
+ *   propertyType: string,             // e.g., "Banquet Hall", "Wedding Venue", "Party Hall"
+ *   numberOfFloors: number,
+ *   yearOfConstruction: number,
+ *   totalRooms: number,
+ *   roomTypes: string[],              // e.g., ["Deluxe", "Suite", "Standard"]
+ *   maxOccupancyPerRoom: number,
+ *   attachedBathrooms: number,
+ *   roomSize: string,                 // e.g., "500 sq ft"
+ *   
+ *   // Amenities
+ *   amenities: {
+ *     parking: boolean,
+ *     wifi: boolean,
+ *     ac: boolean,
+ *     catering: boolean,
+ *     decoration: boolean,
+ *     dj: boolean,
+ *     stage: boolean,
+ *     generator: boolean,
+ *     // ... other amenities
+ *   },
+ *   
+ *   // Photos (URLs or data URLs)
+ *   exteriorPhotos: string[],
+ *   receptionPhotos: string[],
+ *   roomPhotos: string[],
+ *   bathroomPhotos: string[],
+ *   lobbyPhotos: string[],
+ *   
+ *   // Documents (data URLs or base64)
+ *   documents: {
+ *     tradeLicense: string,
+ *     fireSafetyNoc: string,
+ *     propertyOwnershipProof: string
+ *   },
+ *   
+ *   // Policy
+ *   cancellationPolicyAgreed: boolean
+ * }
+ */
+router.post('/banquet-service', async (req, res) => {
+  try {
+    const {
+      businessId,
+      propertyType,
+      numberOfFloors,
+      yearOfConstruction,
+      totalRooms,
+      roomTypes,
+      maxOccupancyPerRoom,
+      attachedBathrooms,
+      roomSize,
+      amenities,
+      exteriorPhotos,
+      receptionPhotos,
+      roomPhotos,
+      bathroomPhotos,
+      lobbyPhotos,
+      documents = {},
+      cancellationPolicyAgreed,
+    } = req.body || {};
+
+    // Validation
+    if (!businessId) {
+      return res.status(400).json({ message: 'businessId is required' });
+    }
+
+    const business = await Business.findById(businessId);
+    if (!business) {
+      return res.status(404).json({ message: 'Business not found' });
+    }
+
+    // Update property details
+    if (propertyType !== undefined) business.propertyType = propertyType;
+    if (numberOfFloors !== undefined) business.numberOfFloors = numberOfFloors;
+    if (yearOfConstruction !== undefined) business.yearOfConstruction = yearOfConstruction;
+    if (totalRooms !== undefined) business.totalRooms = totalRooms;
+    if (roomTypes !== undefined) business.roomTypes = roomTypes;
+    if (maxOccupancyPerRoom !== undefined) business.maxOccupancyPerRoom = maxOccupancyPerRoom;
+    if (attachedBathrooms !== undefined) business.attachedBathrooms = attachedBathrooms;
+    if (roomSize !== undefined) business.roomSize = roomSize;
+
+    // Update amenities
+    if (amenities && typeof amenities === 'object') {
+      business.amenities = { ...business.amenities, ...amenities };
+    }
+
+    // Update photos
+    if (Array.isArray(exteriorPhotos)) business.exteriorPhotos = exteriorPhotos;
+    if (Array.isArray(receptionPhotos)) business.receptionPhotos = receptionPhotos;
+    if (Array.isArray(roomPhotos)) business.roomPhotos = roomPhotos;
+    if (Array.isArray(bathroomPhotos)) business.bathroomPhotos = bathroomPhotos;
+    if (Array.isArray(lobbyPhotos)) business.lobbyPhotos = lobbyPhotos;
+
+    // Handle documents
+    if (documents && typeof documents === 'object') {
+      // Trade License
+      if (documents.tradeLicense) {
+        const parsed = parseDataUrl(documents.tradeLicense);
+        if (!parsed) return res.status(400).json({ message: 'Invalid tradeLicense format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.tradeLicense = processed.buffer;
+        business.tradeLicenseUrl = await saveBufferAsUpload(processed, 'tradeLicense', req);
+      }
+
+      // Fire Safety NOC
+      if (documents.fireSafetyNoc) {
+        const parsed = parseDataUrl(documents.fireSafetyNoc);
+        if (!parsed) return res.status(400).json({ message: 'Invalid fireSafetyNoc format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.fireSafetyNoc = processed.buffer;
+        business.fireSafetyNocUrl = await saveBufferAsUpload(processed, 'fireSafetyNoc', req);
+      }
+
+      // Property Ownership Proof
+      if (documents.propertyOwnershipProof) {
+        const parsed = parseDataUrl(documents.propertyOwnershipProof);
+        if (!parsed) return res.status(400).json({ message: 'Invalid propertyOwnershipProof format' });
+        const processed = await processImage(parsed.buffer, 'doc');
+        business.propertyOwnershipProof = processed.buffer;
+        business.propertyOwnershipProofUrl = await saveBufferAsUpload(processed, 'propertyOwnershipProof', req);
+      }
+    }
+
+    // Cancellation policy
+    if (cancellationPolicyAgreed !== undefined) {
+      business.cancellationPolicyAgreed = !!cancellationPolicyAgreed;
+    }
+
+    const saved = await business.save();
+
+    // Prepare response without Buffer data
+    const response = saved.toObject();
+    delete response.logo;
+    delete response.govtId;
+    delete response.registrationProof;
+    delete response.cancelledCheque;
+    delete response.ownerPhoto;
+    delete response.previewPhoto;
+    delete response.tradeLicense;
+    delete response.fireSafetyNoc;
+    delete response.propertyOwnershipProof;
+
+    res.status(200).json({
+      message: 'Banquet service details updated',
+      business: response,
+    });
+  } catch (err) {
+    console.error('Banquet service endpoint error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========================================================================================
+// PANDIT SERVICE API - For creating Pandit/Priest service listings
+// ========================================================================================
+
+/**
+ * POST /api/business/pandit-service
+ * 
+ * Creates or updates a Pandit service listing.
+ * Each service has a category (e.g., Ceremonies, Homam) and selected sub-services with hours and price.
+ * 
+ * Prerequisites: Business must already exist with serviceType = 'Pandit'
+ * 
+ * Payload structure:
+ * {
+ *   businessId: string,               // Required - the existing business ID
+ *   
+ *   // Service Details
+ *   serviceCategory: string,          // Required - e.g., 'Ceremonies', 'Homam', 'Poojas'
+ *   
+ *   // Selected sub-services with pricing
+ *   subServices: [
+ *     {
+ *       name: string,                 // e.g., 'Hindu Wedding', 'Ganapathi Homam'
+ *       hours: number,                // Duration in hours
+ *       price: string,                // Price for this sub-service
+ *       description?: string          // Optional description
+ *     }
+ *   ],
+ *   
+ *   // Optional service images
+ *   images?: string[]                 // Array of image URLs or data URLs
+ * }
+ * 
+ * Available service categories and sub-options can be fetched from GET /api/business/options
+ */
+router.post('/pandit-service', async (req, res) => {
+  try {
+    const {
+      businessId,
+      serviceCategory,
+      subServices = [],
+      images = [],
+    } = req.body || {};
+
+    // Validation
+    if (!businessId) {
+      return res.status(400).json({ message: 'businessId is required' });
+    }
+    if (!serviceCategory) {
+      return res.status(400).json({ message: 'serviceCategory is required' });
+    }
+    if (!Array.isArray(subServices) || subServices.length === 0) {
+      return res.status(400).json({ message: 'At least one sub-service is required' });
+    }
+
+    const business = await Business.findById(businessId);
+    if (!business) {
+      return res.status(404).json({ message: 'Business not found' });
+    }
+
+    // Validate that business is of Pandit type
+    if (business.serviceType !== 'Pandit') {
+      return res.status(400).json({ message: 'This endpoint is only for Pandit service type' });
+    }
+
+    // Validate service category exists in PANDIT_SERVICES
+    if (!PANDIT_SERVICES[serviceCategory]) {
+      return res.status(400).json({ 
+        message: 'Invalid service category',
+        validCategories: Object.keys(PANDIT_SERVICES)
+      });
+    }
+
+    // Validate sub-services
+    const validSubServiceNames = PANDIT_SERVICES[serviceCategory].map(s => s.name);
+    for (const sub of subServices) {
+      if (!sub.name || !sub.price) {
+        return res.status(400).json({ message: 'Each sub-service must have name and price' });
+      }
+      if (!validSubServiceNames.includes(sub.name)) {
+        return res.status(400).json({ 
+          message: `Invalid sub-service name: ${sub.name}`,
+          validOptions: validSubServiceNames
+        });
+      }
+      if (sub.hours !== undefined && (typeof sub.hours !== 'number' || sub.hours < 0)) {
+        return res.status(400).json({ message: 'hours must be a positive number' });
+      }
+    }
+
+    // Process images if they are data URLs
+    const processedImages = [];
+    for (const img of images) {
+      if (typeof img === 'string') {
+        if (img.startsWith('data:')) {
+          const parsed = parseDataUrl(img);
+          if (parsed) {
+            const processed = await processImage(parsed.buffer, 'photo');
+            const url = await saveBufferAsUpload(processed, 'pandit-service', req);
+            processedImages.push(url);
+          }
+        } else if (img.startsWith('http://') || img.startsWith('https://')) {
+          processedImages.push(img);
+        }
+      }
+    }
+
+    // Create the service entry
+    const newService = {
+      serviceName: serviceCategory,
+      price: subServices[0]?.price || '0', // Main price from first sub-service or custom
+      description: `${serviceCategory} services by Pandit`,
+      hasSubServices: 'yes',
+      subServices: subServices.map(sub => ({
+        serviceName: sub.name,
+        price: sub.price,
+        description: sub.description || `${sub.name} - ${sub.hours || 1} hour(s)`,
+        // Store hours in description for now, or we can add a custom field
+      })),
+      images: processedImages,
+    };
+
+    // Check if service category already exists, update it; else add new
+    const existingServiceIndex = business.services.findIndex(
+      s => s.serviceName === serviceCategory
+    );
+
+    if (existingServiceIndex >= 0) {
+      // Update existing service
+      business.services[existingServiceIndex] = {
+        ...business.services[existingServiceIndex].toObject(),
+        ...newService,
+      };
+    } else {
+      // Add new service
+      business.services.push(newService);
+    }
+
+    const saved = await business.save();
+
+    // Prepare response
+    const response = saved.toObject();
+    delete response.logo;
+    delete response.govtId;
+    delete response.registrationProof;
+    delete response.cancelledCheque;
+    delete response.ownerPhoto;
+    delete response.previewPhoto;
+
+    res.status(200).json({
+      message: existingServiceIndex >= 0 ? 'Pandit service updated' : 'Pandit service created',
+      business: response,
+    });
+  } catch (err) {
+    console.error('Pandit service endpoint error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/business/pandit-options
+ * 
+ * Returns all available options for Pandit service creation.
+ * Includes service categories, sub-services with default hours, and available languages.
+ */
+router.get('/pandit-options', (req, res) => {
+  res.json({
+    languages: PANDIT_LANGUAGES,
+    serviceCategories: Object.keys(PANDIT_SERVICES),
+    services: PANDIT_SERVICES,
+  });
+});
+
 /**
  * POST /api/business/vendor-onboard-multipart
  * 
- * Same as vendor-onboard but accepts multipart/form-data for file uploads
+ * Same as vendor-onboard but accepts multipart/form-data for file uploads.
+ * NOTE: For banquet/venue-specific details, use POST /api/business/banquet-service
  */
 router.post('/vendor-onboard-multipart',
   upload.fields([
@@ -1674,7 +2192,7 @@ router.post('/vendor-onboard-multipart',
       const businessInfoFields = [
         'ownerName', 'businessName', 'email', 'phone', 'whatsapp',
         'workingDays', 'openingTime', 'closingTime',
-        'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber',
+        'gstNumber', 'cinNumber', 'panNumber', 'aadhaarNumber', 'businessType',
         'bankAccount', 'ifscCode', 'isRegisteredBusiness', 'serviceDetail'
       ];
       for (const field of businessInfoFields) {
@@ -1834,6 +2352,7 @@ router.get('/vendor/:userId', async (req, res) => {
       // Step 4: Themes
       themes: business.themes,
       eventTypes: business.eventTypes,
+      languages: business.languages,
       
       // Step 5: Agreement
       agreementSigned: business.agreementSigned,

@@ -47,20 +47,39 @@ const businessSchema = new mongoose.Schema({
     index: true,
   },
   // Banquet Hall specific fields
-  propertyType: { type: String, enum: ['hotel', 'guest house', 'lodge', 'homestay', 'banquet hall'] }, // Basic Property Info
+  propertyType: { type: String, enum: ['hotel', 'guest house', 'lodge', 'homestay', 'banquet hall', 'resort', 'convention center'] }, // Basic Property Info
   numberOfFloors: { type: Number },
   yearOfConstruction: { type: Number },
   // Property Infrastructure
   totalRooms: { type: Number },
-  roomTypes: [{ type: String }], // e.g., ['Classic', 'Deluxe', 'Suite']
+  roomTypes: [{
+    type: { type: String },
+    count: { type: Number },
+    maxOccupancy: { type: Number },
+    hasAttachedBathroom: { type: Boolean, default: false },
+    roomSize: { type: String },
+  }],
   maxOccupancyPerRoom: { type: Number },
   attachedBathrooms: { type: Boolean },
   roomSize: { type: String }, // e.g., '200 sq ft'
+  // Banquet hall capacity
+  totalHallCapacity: { type: Number },
+  hallArea: { type: String },
+  diningCapacity: { type: Number },
   gstNumber: { type: String }, // optional
   cinNumber: { type: String }, // optional
   panNumber: { type: String }, // optional
   aadhaarNumber: { type: String }, // optional
-  businessType: { type: String, enum: ['individual', 'partnership', 'LLP', 'Pvt Ltd'] }, // Added for banquet halls
+  businessType: { 
+    type: String, 
+    enum: [
+      'individual', 'Individual',
+      'partnership', 'Partnership',
+      'LLP', 'LLP (Limited Liability Partnership)',
+      'Pvt Ltd', 'Pvt Ltd (Private Limited)', 'Private Limited',
+      'proprietorship', 'Proprietorship'
+    ] 
+  }, // Added for banquet halls
   createdAt: { type: Date, default: Date.now },
   bankAccount: { type: String },
   ifscCode: { type: String },
@@ -93,6 +112,13 @@ const businessSchema = new mongoose.Schema({
     cctv: { type: Boolean, default: false },
     inHouseCaterers: { type: Boolean, default: false },
     swimmingPool: { type: Boolean, default: false },
+    djSound: { type: Boolean, default: false },
+    generator: { type: Boolean, default: false },
+    valetParking: { type: Boolean, default: false },
+    decorServices: { type: Boolean, default: false },
+    brideGroomRoom: { type: Boolean, default: false },
+    outdoorArea: { type: Boolean, default: false },
+    terrace: { type: Boolean, default: false },
   },
   // Timed offline support
   // When status === 'offline' and offlineUntil is a future date, listing auto-restores to online at that time
@@ -198,8 +224,28 @@ businessSchema.add({
   roomPhotos: [{ type: String }],
   bathroomPhotos: [{ type: String }],
   lobbyPhotos: [{ type: String }],
+  hallPhotos: [{ type: String }],
+  diningAreaPhotos: [{ type: String }],
+  outdoorAreaPhotos: [{ type: String }],
+  parkingPhotos: [{ type: String }],
   // Cancellation & refund policy agreement
   cancellationPolicyAgreed: { type: Boolean, default: false },
+  cancellationPolicy: {
+    fullRefundDays: { type: Number, default: 30 },
+    partialRefundDays: { type: Number, default: 15 },
+    partialRefundPercent: { type: Number, default: 50 },
+    noRefundDays: { type: Number, default: 7 },
+  },
+  // Banquet hall pricing
+  pricing: {
+    basePrice: { type: Number },
+    pricingType: { type: String, enum: ['per_day', 'per_plate', 'per_event', 'custom'] },
+    vegPlatePrice: { type: Number },
+    nonVegPlatePrice: { type: Number },
+    roomRentPerNight: { type: Number },
+  },
+  // FSSAI License for in-house catering
+  fssaiLicenseUrl: { type: String },
 });
 
 module.exports = mongoose.model("Business", businessSchema);

@@ -168,6 +168,59 @@ const businessSchema = new mongoose.Schema({
           images: [String],
         }, { _id: true, id: false })
       ],
+      
+      // ========== INVITATION CARD DESIGNER / Card Printing specific fields ==========
+      // Card Specifications
+      numberOfPages: { type: Number, min: 1 },
+      isLaminated: { type: Boolean, default: false },
+      laminationType: { type: String, enum: ['matte', 'glossy', 'soft-touch', 'none'] },
+      
+      // Card Dimensions
+      cardWidth: { type: Number }, // in dimensionUnit
+      cardHeight: { type: Number }, // in dimensionUnit
+      dimensionUnit: { type: String, enum: ['mm', 'inches', 'cm'], default: 'inches' },
+      
+      // Paper Details
+      paperThickness: { type: String }, // e.g., '300 GSM', '350 GSM'
+      paperMaterial: { type: String }, // e.g., 'Art Paper', 'Cardstock', 'Handmade Paper'
+      
+      // Available Colors
+      availableColors: [{ type: String }], // e.g., ['White', 'Ivory', 'Gold', 'Silver']
+      
+      // Bulk Discounts for packs of 100, 200, 500, 1000
+      bulkDiscounts: [
+        new mongoose.Schema({
+          quantity: { type: Number, required: true }, // e.g., 100, 200, 500, 1000
+          discountPercent: { type: Number, min: 0, max: 100 },
+          discountPrice: { type: Number }, // Fixed price per card at this quantity
+        }, { _id: false, id: false })
+      ],
+      
+      // Additional Props/Design
+      additionalPropsDesign: { type: String }, // Text for mentioning extra props/designs
+      
+      // Envelope Details
+      includesEnvelope: { type: Boolean, default: false },
+      envelopeDesign: { type: String },
+      envelopeImages: [{ type: String }],
+      envelopeColor: { type: String },
+      
+      // Wax Seal
+      hasWaxSeal: { type: Boolean, default: false },
+      waxSealColor: { type: String },
+      waxSealDesign: { type: String },
+      waxSealImages: [{ type: String }],
+      waxSealPrice: { type: Number, default: 0 },
+      
+      // Card Type/Category
+      cardType: { 
+        type: String, 
+        enum: ['wedding', 'engagement', 'birthday', 'anniversary', 'baby-shower', 'corporate', 'religious', 'festival', 'other']
+      },
+      
+      // Production Details
+      minimumOrderQuantity: { type: Number, default: 1 },
+      productionTimeInDays: { type: Number, default: 7 },
     }
   ]
   ,

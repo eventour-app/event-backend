@@ -291,6 +291,91 @@ router.post('/onboard', async (req, res) => {
             if (rates.length) item.rates = rates;
           }
         }
+        
+        // Invitation Card Designer / Card Printing specific fields
+        if (/invitation card designer/i.test(String(serviceType || ''))) {
+          // Card specifications
+          if (s.numberOfPages !== undefined) item.numberOfPages = Number(s.numberOfPages);
+          if (s.isLaminated !== undefined) item.isLaminated = Boolean(s.isLaminated);
+          if (s.laminationType) item.laminationType = String(s.laminationType);
+          
+          // Dimensions
+          if (s.cardWidth !== undefined) item.cardWidth = Number(s.cardWidth);
+          if (s.cardHeight !== undefined) item.cardHeight = Number(s.cardHeight);
+          if (s.dimensionUnit) item.dimensionUnit = String(s.dimensionUnit);
+          
+          // Paper details
+          if (s.paperThickness) item.paperThickness = String(s.paperThickness);
+          if (s.paperMaterial) item.paperMaterial = String(s.paperMaterial);
+          
+          // Available colors
+          if (Array.isArray(s.availableColors)) {
+            item.availableColors = s.availableColors.map(String);
+          }
+          
+          // Bulk discounts
+          if (Array.isArray(s.bulkDiscounts)) {
+            item.bulkDiscounts = s.bulkDiscounts
+              .filter(d => d && d.quantity)
+              .map(d => ({
+                quantity: Number(d.quantity),
+                discountPercent: d.discountPercent !== undefined ? Number(d.discountPercent) : undefined,
+                discountPrice: d.discountPrice !== undefined ? Number(d.discountPrice) : undefined,
+              }));
+          }
+          
+          // Additional props/design
+          if (s.additionalPropsDesign) item.additionalPropsDesign = String(s.additionalPropsDesign);
+          
+          // Envelope details
+          if (s.includesEnvelope !== undefined) item.includesEnvelope = Boolean(s.includesEnvelope);
+          if (s.envelopeDesign) item.envelopeDesign = String(s.envelopeDesign);
+          if (s.envelopeColor) item.envelopeColor = String(s.envelopeColor);
+          item.envelopeImages = [];
+          if (Array.isArray(s.envelopeImages) && s.envelopeImages.length) {
+            for (const img of s.envelopeImages) {
+              if (typeof img !== 'string') continue;
+              if (img.startsWith('data:')) {
+                const p = parseDataUrl(img);
+                if (!p) continue;
+                const processed = await processImage(p.buffer, 'envelope');
+                const url = await saveBufferAsUpload(processed, 'envelope', req);
+                item.envelopeImages.push(url);
+              } else {
+                const normalized = normalizeIncomingImageUrl(img, req);
+                if (normalized) item.envelopeImages.push(normalized);
+              }
+            }
+          }
+          
+          // Wax seal details
+          if (s.hasWaxSeal !== undefined) item.hasWaxSeal = Boolean(s.hasWaxSeal);
+          if (s.waxSealColor) item.waxSealColor = String(s.waxSealColor);
+          if (s.waxSealDesign) item.waxSealDesign = String(s.waxSealDesign);
+          if (s.waxSealPrice !== undefined) item.waxSealPrice = Number(s.waxSealPrice);
+          item.waxSealImages = [];
+          if (Array.isArray(s.waxSealImages) && s.waxSealImages.length) {
+            for (const img of s.waxSealImages) {
+              if (typeof img !== 'string') continue;
+              if (img.startsWith('data:')) {
+                const p = parseDataUrl(img);
+                if (!p) continue;
+                const processed = await processImage(p.buffer, 'waxseal');
+                const url = await saveBufferAsUpload(processed, 'waxseal', req);
+                item.waxSealImages.push(url);
+              } else {
+                const normalized = normalizeIncomingImageUrl(img, req);
+                if (normalized) item.waxSealImages.push(normalized);
+              }
+            }
+          }
+          
+          // Card type and production details
+          if (s.cardType) item.cardType = String(s.cardType);
+          if (s.minimumOrderQuantity !== undefined) item.minimumOrderQuantity = Number(s.minimumOrderQuantity);
+          if (s.productionTimeInDays !== undefined) item.productionTimeInDays = Number(s.productionTimeInDays);
+        }
+        
         if (Array.isArray(s.images) && s.images.length) {
           for (const img of s.images) {
             if (typeof img !== 'string') continue;
@@ -716,41 +801,188 @@ router.post('/onboard-multipart',
 
   // List services for a business (vendor-side)
   // GET /api/business/:businessId/services
+  // Returns all services with full details for all service types (Pandit, Photographer, Food Caterer, Card Printer, etc.)
   router.get('/:businessId/services', async (req, res) => {
     try {
       const { businessId } = req.params;
       const business = await Business.findById(businessId).lean();
       if (!business) return res.status(404).json({ message: 'Business not found' });
-      const services = (business.services || []).map(s => ({
+      
+      // Return full service objects with all fields for all service types
+      const services = (business.services || []).map(s => {
+        const service = {
+          _id: s._id,
+          serviceName: s.serviceName,
+          price: s.price,
+          discount: s.discount,
+          description: s.description,
+          images: s.images || [],
+          serviceLocations: s.serviceLocations || [],
+          hasSubServices: s.hasSubServices || 'no',
+          
+          // Pandit-specific fields
+          type: s.type,
+          subtype: s.subtype,
+          hours: s.hours,
+          
+          // Food Caterer specific
+          maxPlates: s.maxPlates,
+          
+          // Photographer specific - tiered rates
+          rates: s.rates || [],
+          
+          // Invitation Card Designer / Card Printing specific fields
+          numberOfPages: s.numberOfPages,
+          isLaminated: s.isLaminated,
+          laminationType: s.laminationType,
+          cardWidth: s.cardWidth,
+          cardHeight: s.cardHeight,
+          dimensionUnit: s.dimensionUnit,
+          paperThickness: s.paperThickness,
+          paperMaterial: s.paperMaterial,
+          availableColors: s.availableColors || [],
+          bulkDiscounts: s.bulkDiscounts || [],
+          additionalPropsDesign: s.additionalPropsDesign,
+          includesEnvelope: s.includesEnvelope,
+          envelopeDesign: s.envelopeDesign,
+          envelopeImages: s.envelopeImages || [],
+          envelopeColor: s.envelopeColor,
+          hasWaxSeal: s.hasWaxSeal,
+          waxSealColor: s.waxSealColor,
+          waxSealDesign: s.waxSealDesign,
+          waxSealImages: s.waxSealImages || [],
+          waxSealPrice: s.waxSealPrice,
+          cardType: s.cardType,
+          minimumOrderQuantity: s.minimumOrderQuantity,
+          productionTimeInDays: s.productionTimeInDays,
+          
+          // Sub-services (for Pandit and others)
+          subServices: (s.subServices || []).map(sub => ({
+            _id: sub._id,
+            serviceName: sub.serviceName,
+            subtype: sub.subtype,
+            hours: sub.hours,
+            price: sub.price,
+            discount: sub.discount,
+            description: sub.description,
+            maxPlates: sub.maxPlates,
+            images: sub.images || [],
+          })),
+        };
+        
+        // Clean up undefined values for cleaner response
+        Object.keys(service).forEach(key => {
+          if (service[key] === undefined) delete service[key];
+        });
+        
+        return service;
+      });
+      
+      res.json({ 
+        services, 
+        total: services.length,
+        serviceType: business.serviceType,
+        business: {
+          _id: business._id,
+          businessName: business.businessName,
+          serviceType: business.serviceType,
+        }
+      });
+    } catch (err) {
+      console.error('get services error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get single service details
+  // GET /api/business/:businessId/services/:serviceId
+  // Returns full service details for any service type
+  router.get('/:businessId/services/:serviceId', async (req, res) => {
+    try {
+      const { businessId, serviceId } = req.params;
+      
+      const business = await Business.findById(businessId).lean();
+      if (!business) return res.status(404).json({ message: 'Business not found' });
+      
+      const s = (business.services || []).find(svc => String(svc._id) === String(serviceId));
+      if (!s) return res.status(404).json({ message: 'Service not found' });
+      
+      // Build full service object with all fields
+      const service = {
         _id: s._id,
         serviceName: s.serviceName,
         price: s.price,
         discount: s.discount,
         description: s.description,
-        // Pandit-specific fields at service level
+        images: s.images || [],
+        serviceLocations: s.serviceLocations || [],
+        hasSubServices: s.hasSubServices || 'no',
+        
+        // Pandit-specific fields
         type: s.type,
         subtype: s.subtype,
         hours: s.hours,
-        // Other vendor fields
+        
+        // Food Caterer specific
         maxPlates: s.maxPlates,
-        serviceLocations: s.serviceLocations,
-        images: s.images,
-        hasSubServices: s.hasSubServices || 'no',
+        
+        // Photographer specific - tiered rates
+        rates: s.rates || [],
+        
+        // Invitation Card Designer / Card Printing specific fields
+        numberOfPages: s.numberOfPages,
+        isLaminated: s.isLaminated,
+        laminationType: s.laminationType,
+        cardWidth: s.cardWidth,
+        cardHeight: s.cardHeight,
+        dimensionUnit: s.dimensionUnit,
+        paperThickness: s.paperThickness,
+        paperMaterial: s.paperMaterial,
+        availableColors: s.availableColors || [],
+        bulkDiscounts: s.bulkDiscounts || [],
+        additionalPropsDesign: s.additionalPropsDesign,
+        includesEnvelope: s.includesEnvelope,
+        envelopeDesign: s.envelopeDesign,
+        envelopeImages: s.envelopeImages || [],
+        envelopeColor: s.envelopeColor,
+        hasWaxSeal: s.hasWaxSeal,
+        waxSealColor: s.waxSealColor,
+        waxSealDesign: s.waxSealDesign,
+        waxSealImages: s.waxSealImages || [],
+        waxSealPrice: s.waxSealPrice,
+        cardType: s.cardType,
+        minimumOrderQuantity: s.minimumOrderQuantity,
+        productionTimeInDays: s.productionTimeInDays,
+        
+        // Sub-services
         subServices: (s.subServices || []).map(sub => ({
           _id: sub._id,
           serviceName: sub.serviceName,
-          // Pandit-specific fields for subServices
           subtype: sub.subtype,
           hours: sub.hours,
           price: sub.price,
           discount: sub.discount,
           description: sub.description,
           maxPlates: sub.maxPlates,
-          images: sub.images,
+          images: sub.images || [],
         })),
-      }));
-      res.json({ services, serviceType: business.serviceType });
+      };
+      
+      // Clean up undefined values
+      Object.keys(service).forEach(key => {
+        if (service[key] === undefined) delete service[key];
+      });
+      
+      res.json({ 
+        service,
+        business: {
+          _id: business._id,
+          businessName: business.businessName,
+          serviceType: business.serviceType,
+        }
+      });
     } catch (err) {
+      console.error('get service error:', err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -829,8 +1061,9 @@ router.post('/onboard-multipart',
 
 // ---------------- Add Services to an existing listing ----------------
 // POST /api/business/:businessId/services
-// body: { services: [{ serviceName, price?, discount?, description?, images?: string[], serviceLocations?: string[], hasSubServices?: 'yes'|'no', subServices?: [...] }] }
+// body: { services: [{ serviceName, price?, discount?, description?, images?: string[], serviceLocations?: string[], hasSubServices?: 'yes'|'no', subServices?: [...], ...cardPrintingFields }] }
 // For Pandit vendors: serviceName = category, subServices[] with subtype, hours, price, description
+// For Invitation Card Designer: includes numberOfPages, isLaminated, laminationType, cardWidth, cardHeight, etc.
 router.post('/:businessId/services', async (req, res) => {
   try {
     const { businessId } = req.params;
@@ -842,6 +1075,7 @@ router.post('/:businessId/services', async (req, res) => {
     if (!business) return res.status(404).json({ message: 'Business not found' });
 
     const isPandit = business.serviceType === 'Pandit';
+    const isCardPrinter = /invitation card designer/i.test(String(business.serviceType || ''));
 
     const toAdd = [];
     for (const s of services) {
@@ -873,16 +1107,100 @@ router.post('/:businessId/services', async (req, res) => {
         hasSubServices: hasSubServices,
         subServices: [],
       };
+      
+      // ========== INVITATION CARD DESIGNER / Card Printing specific fields ==========
+      if (isCardPrinter) {
+        // Card specifications
+        if (s.numberOfPages !== undefined) item.numberOfPages = Number(s.numberOfPages);
+        if (s.isLaminated !== undefined) item.isLaminated = Boolean(s.isLaminated);
+        if (s.laminationType) item.laminationType = String(s.laminationType);
+        
+        // Dimensions
+        if (s.cardWidth !== undefined) item.cardWidth = Number(s.cardWidth);
+        if (s.cardHeight !== undefined) item.cardHeight = Number(s.cardHeight);
+        if (s.dimensionUnit) item.dimensionUnit = String(s.dimensionUnit);
+        
+        // Paper details
+        if (s.paperThickness) item.paperThickness = String(s.paperThickness);
+        if (s.paperMaterial) item.paperMaterial = String(s.paperMaterial);
+        
+        // Available colors
+        if (Array.isArray(s.availableColors)) {
+          item.availableColors = s.availableColors.map(String);
+        }
+        
+        // Bulk discounts
+        if (Array.isArray(s.bulkDiscounts)) {
+          item.bulkDiscounts = s.bulkDiscounts
+            .filter(d => d && d.quantity)
+            .map(d => ({
+              quantity: Number(d.quantity),
+              discountPercent: d.discountPercent !== undefined ? Number(d.discountPercent) : undefined,
+              discountPrice: d.discountPrice !== undefined ? Number(d.discountPrice) : undefined,
+            }));
+        }
+        
+        // Additional props/design
+        if (s.additionalPropsDesign) item.additionalPropsDesign = String(s.additionalPropsDesign);
+        
+        // Envelope details
+        if (s.includesEnvelope !== undefined) item.includesEnvelope = Boolean(s.includesEnvelope);
+        if (s.envelopeDesign) item.envelopeDesign = String(s.envelopeDesign);
+        if (s.envelopeColor) item.envelopeColor = String(s.envelopeColor);
+        item.envelopeImages = [];
+        if (Array.isArray(s.envelopeImages) && s.envelopeImages.length) {
+          for (const img of s.envelopeImages) {
+            if (typeof img === 'string' && img.startsWith('data:')) {
+              const p = parseDataUrl(img);
+              if (!p) continue;
+              const processed = await processImage(p.buffer, 'envelope');
+              const url = await saveBufferAsUpload(processed, 'envelope', req);
+              item.envelopeImages.push(url);
+            } else if (typeof img === 'string') {
+              const normalized = normalizeIncomingImageUrl(img, req);
+              if (normalized) item.envelopeImages.push(normalized);
+            }
+          }
+        }
+        
+        // Wax seal details
+        if (s.hasWaxSeal !== undefined) item.hasWaxSeal = Boolean(s.hasWaxSeal);
+        if (s.waxSealColor) item.waxSealColor = String(s.waxSealColor);
+        if (s.waxSealDesign) item.waxSealDesign = String(s.waxSealDesign);
+        if (s.waxSealPrice !== undefined) item.waxSealPrice = Number(s.waxSealPrice);
+        item.waxSealImages = [];
+        if (Array.isArray(s.waxSealImages) && s.waxSealImages.length) {
+          for (const img of s.waxSealImages) {
+            if (typeof img === 'string' && img.startsWith('data:')) {
+              const p = parseDataUrl(img);
+              if (!p) continue;
+              const processed = await processImage(p.buffer, 'waxseal');
+              const url = await saveBufferAsUpload(processed, 'waxseal', req);
+              item.waxSealImages.push(url);
+            } else if (typeof img === 'string') {
+              const normalized = normalizeIncomingImageUrl(img, req);
+              if (normalized) item.waxSealImages.push(normalized);
+            }
+          }
+        }
+        
+        // Card type and production details
+        if (s.cardType) item.cardType = String(s.cardType);
+        if (s.minimumOrderQuantity !== undefined) item.minimumOrderQuantity = Number(s.minimumOrderQuantity);
+        if (s.productionTimeInDays !== undefined) item.productionTimeInDays = Number(s.productionTimeInDays);
+      }
+      
       if (Array.isArray(s.images) && s.images.length) {
         for (const img of s.images) {
           if (typeof img === 'string' && img.startsWith('data:')) {
             const p = parseDataUrl(img);
             if (!p) continue;
             const processed = await processImage(p.buffer, 'service');
-            item.images.push(toDataUrl(processed));
+            const url = await saveBufferAsUpload(processed, 'service', req);
+            item.images.push(url);
           } else if (typeof img === 'string') {
-            // Accept plain URLs as-is
-            item.images.push(img);
+            const normalized = normalizeIncomingImageUrl(img, req);
+            if (normalized) item.images.push(normalized);
           }
         }
       }
@@ -910,9 +1228,11 @@ router.post('/:businessId/services', async (req, res) => {
                 const p = parseDataUrl(img);
                 if (!p) continue;
                 const processed = await processImage(p.buffer, 'service');
-                subItem.images.push(toDataUrl(processed));
+                const url = await saveBufferAsUpload(processed, 'service', req);
+                subItem.images.push(url);
               } else if (typeof img === 'string') {
-                subItem.images.push(img);
+                const normalized = normalizeIncomingImageUrl(img, req);
+                if (normalized) subItem.images.push(normalized);
               }
             }
           }
@@ -937,11 +1257,19 @@ router.post('/:businessId/services', async (req, res) => {
 
 // Update a single service on a listing
 // PUT /api/business/:businessId/services/:serviceId
-// Body (any subset): { serviceName?, price?, discount?, description?, type?, subtype?, hours?, maxPlates?, images?: string[], serviceLocations?: string[], hasSubServices?, subServices?: [...] }
+// Body (any subset): { serviceName?, price?, discount?, description?, type?, subtype?, hours?, maxPlates?, images?: string[], serviceLocations?: string[], hasSubServices?, subServices?: [...], ...cardPrintingFields }
 router.put('/:businessId/services/:serviceId', async (req, res) => {
   try {
     const { businessId, serviceId } = req.params;
-    const { serviceName, price, discount, description, type, subtype, hours, maxPlates, images, serviceLocations, hasSubServices, subServices } = req.body || {};
+    const { 
+      serviceName, price, discount, description, type, subtype, hours, maxPlates, images, serviceLocations, hasSubServices, subServices,
+      // Card printing specific fields
+      numberOfPages, isLaminated, laminationType, cardWidth, cardHeight, dimensionUnit,
+      paperThickness, paperMaterial, availableColors, bulkDiscounts, additionalPropsDesign,
+      includesEnvelope, envelopeDesign, envelopeImages, envelopeColor,
+      hasWaxSeal, waxSealColor, waxSealDesign, waxSealImages, waxSealPrice,
+      cardType, minimumOrderQuantity, productionTimeInDays
+    } = req.body || {};
 
     const business = await Business.findById(businessId);
     if (!business) return res.status(404).json({ message: 'Business not found' });
@@ -969,6 +1297,114 @@ router.put('/:businessId/services/:serviceId', async (req, res) => {
     if (serviceLocations !== undefined) {
       if (!Array.isArray(serviceLocations)) return res.status(400).json({ message: 'serviceLocations must be an array of strings' });
       svc.serviceLocations = serviceLocations.map(String);
+    }
+
+    // ========== INVITATION CARD DESIGNER / Card Printing specific fields ==========
+    const isCardPrinter = /invitation card designer/i.test(String(business.serviceType || ''));
+    
+    if (isCardPrinter) {
+      // Card specifications
+      if (numberOfPages !== undefined) svc.numberOfPages = numberOfPages === null ? undefined : Number(numberOfPages);
+      if (isLaminated !== undefined) svc.isLaminated = isLaminated === null ? undefined : Boolean(isLaminated);
+      if (laminationType !== undefined) svc.laminationType = laminationType === null ? undefined : String(laminationType);
+      
+      // Dimensions
+      if (cardWidth !== undefined) svc.cardWidth = cardWidth === null ? undefined : Number(cardWidth);
+      if (cardHeight !== undefined) svc.cardHeight = cardHeight === null ? undefined : Number(cardHeight);
+      if (dimensionUnit !== undefined) svc.dimensionUnit = dimensionUnit === null ? undefined : String(dimensionUnit);
+      
+      // Paper details
+      if (paperThickness !== undefined) svc.paperThickness = paperThickness === null ? undefined : String(paperThickness);
+      if (paperMaterial !== undefined) svc.paperMaterial = paperMaterial === null ? undefined : String(paperMaterial);
+      
+      // Available colors
+      if (availableColors !== undefined) {
+        if (availableColors === null) {
+          svc.availableColors = [];
+        } else if (Array.isArray(availableColors)) {
+          svc.availableColors = availableColors.map(String);
+        }
+      }
+      
+      // Bulk discounts
+      if (bulkDiscounts !== undefined) {
+        if (bulkDiscounts === null) {
+          svc.bulkDiscounts = [];
+        } else if (Array.isArray(bulkDiscounts)) {
+          svc.bulkDiscounts = bulkDiscounts
+            .filter(d => d && d.quantity)
+            .map(d => ({
+              quantity: Number(d.quantity),
+              discountPercent: d.discountPercent !== undefined ? Number(d.discountPercent) : undefined,
+              discountPrice: d.discountPrice !== undefined ? Number(d.discountPrice) : undefined,
+            }));
+        }
+      }
+      
+      // Additional props/design
+      if (additionalPropsDesign !== undefined) svc.additionalPropsDesign = additionalPropsDesign === null ? undefined : String(additionalPropsDesign);
+      
+      // Envelope details
+      if (includesEnvelope !== undefined) svc.includesEnvelope = includesEnvelope === null ? undefined : Boolean(includesEnvelope);
+      if (envelopeDesign !== undefined) svc.envelopeDesign = envelopeDesign === null ? undefined : String(envelopeDesign);
+      if (envelopeColor !== undefined) svc.envelopeColor = envelopeColor === null ? undefined : String(envelopeColor);
+      
+      // Handle envelope images
+      if (envelopeImages !== undefined) {
+        if (envelopeImages === null) {
+          svc.envelopeImages = [];
+        } else if (Array.isArray(envelopeImages)) {
+          const out = [];
+          for (const img of envelopeImages) {
+            if (typeof img !== 'string') continue;
+            if (img.startsWith('data:')) {
+              const p = parseDataUrl(img);
+              if (!p) continue;
+              const processed = await processImage(p.buffer, 'envelope');
+              const url = await saveBufferAsUpload(processed, 'envelope', req);
+              out.push(url);
+            } else {
+              const normalized = normalizeIncomingImageUrl(img, req);
+              if (normalized) out.push(normalized);
+            }
+          }
+          svc.envelopeImages = out;
+        }
+      }
+      
+      // Wax seal details
+      if (hasWaxSeal !== undefined) svc.hasWaxSeal = hasWaxSeal === null ? undefined : Boolean(hasWaxSeal);
+      if (waxSealColor !== undefined) svc.waxSealColor = waxSealColor === null ? undefined : String(waxSealColor);
+      if (waxSealDesign !== undefined) svc.waxSealDesign = waxSealDesign === null ? undefined : String(waxSealDesign);
+      if (waxSealPrice !== undefined) svc.waxSealPrice = waxSealPrice === null ? undefined : Number(waxSealPrice);
+      
+      // Handle wax seal images
+      if (waxSealImages !== undefined) {
+        if (waxSealImages === null) {
+          svc.waxSealImages = [];
+        } else if (Array.isArray(waxSealImages)) {
+          const out = [];
+          for (const img of waxSealImages) {
+            if (typeof img !== 'string') continue;
+            if (img.startsWith('data:')) {
+              const p = parseDataUrl(img);
+              if (!p) continue;
+              const processed = await processImage(p.buffer, 'waxseal');
+              const url = await saveBufferAsUpload(processed, 'waxseal', req);
+              out.push(url);
+            } else {
+              const normalized = normalizeIncomingImageUrl(img, req);
+              if (normalized) out.push(normalized);
+            }
+          }
+          svc.waxSealImages = out;
+        }
+      }
+      
+      // Card type and production details
+      if (cardType !== undefined) svc.cardType = cardType === null ? undefined : String(cardType);
+      if (minimumOrderQuantity !== undefined) svc.minimumOrderQuantity = minimumOrderQuantity === null ? undefined : Number(minimumOrderQuantity);
+      if (productionTimeInDays !== undefined) svc.productionTimeInDays = productionTimeInDays === null ? undefined : Number(productionTimeInDays);
     }
 
     // If images are provided, replace the entire images array after normalizing

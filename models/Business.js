@@ -7,7 +7,11 @@ const businessSchema = new mongoose.Schema({
     ref: "User", // reference to logged-in user
     required: true,
   },
-  serviceType: { type: String, required: true },
+  serviceType: { 
+    type: String, 
+    required: true,
+    enum: ['Pandit', 'photographer', 'food caterer', 'banquet hall', 'Decorator', 'DJ', 'Makeup Artist', 'Mehendi Artist', 'Choreographer', 'Tent House', 'Florist', 'Invitation Card Designer', 'Event Planner']
+  },
   ownerName: { type: String },
   businessName: { type: String},
   email: { type: String},
@@ -22,6 +26,8 @@ const businessSchema = new mongoose.Schema({
     landmark: { type: String },
     pincode: { type: String },
     state: { type: String },
+    city: { type: String }, // Added for banquet halls
+    locality: { type: String }, // Added for banquet halls
     // GPS coordinates string "lat,long"
     gps: { type: String },
   },
@@ -40,10 +46,40 @@ const businessSchema = new mongoose.Schema({
     },
     index: true,
   },
+  // Banquet Hall specific fields
+  propertyType: { type: String, enum: ['hotel', 'guest house', 'lodge', 'homestay', 'banquet hall', 'resort', 'convention center'] }, // Basic Property Info
+  numberOfFloors: { type: Number },
+  yearOfConstruction: { type: Number },
+  // Property Infrastructure
+  totalRooms: { type: Number },
+  roomTypes: [{
+    type: { type: String },
+    count: { type: Number },
+    maxOccupancy: { type: Number },
+    hasAttachedBathroom: { type: Boolean, default: false },
+    roomSize: { type: String },
+  }],
+  maxOccupancyPerRoom: { type: Number },
+  attachedBathrooms: { type: Boolean },
+  roomSize: { type: String }, // e.g., '200 sq ft'
+  // Banquet hall capacity
+  totalHallCapacity: { type: Number },
+  hallArea: { type: String },
+  diningCapacity: { type: Number },
   gstNumber: { type: String }, // optional
   cinNumber: { type: String }, // optional
   panNumber: { type: String }, // optional
   aadhaarNumber: { type: String }, // optional
+  businessType: { 
+    type: String, 
+    enum: [
+      'individual', 'Individual',
+      'partnership', 'Partnership',
+      'LLP', 'LLP (Limited Liability Partnership)',
+      'Pvt Ltd', 'Pvt Ltd (Private Limited)', 'Private Limited',
+      'proprietorship', 'Proprietorship'
+    ] 
+  }, // Added for banquet halls
   createdAt: { type: Date, default: Date.now },
   bankAccount: { type: String },
   ifscCode: { type: String },
@@ -63,6 +99,27 @@ const businessSchema = new mongoose.Schema({
   // Fixed options provided by backend; stored as string arrays
   themes: [{ type: String }],
   eventTypes: [{ type: String }],
+  // For Pandit service type, language preferences
+  languages: [{ type: String }],
+  // Banquet Hall Amenities
+  amenities: {
+    wifi: { type: Boolean, default: false },
+    ac: { type: Boolean, default: false }, // AC/Non-AC
+    projector: { type: Boolean, default: false },
+    elevator: { type: Boolean, default: false },
+    parking: { type: Boolean, default: false },
+    reception: { type: Boolean, default: false },
+    cctv: { type: Boolean, default: false },
+    inHouseCaterers: { type: Boolean, default: false },
+    swimmingPool: { type: Boolean, default: false },
+    djSound: { type: Boolean, default: false },
+    generator: { type: Boolean, default: false },
+    valetParking: { type: Boolean, default: false },
+    decorServices: { type: Boolean, default: false },
+    brideGroomRoom: { type: Boolean, default: false },
+    outdoorArea: { type: Boolean, default: false },
+    terrace: { type: Boolean, default: false },
+  },
   // Timed offline support
   // When status === 'offline' and offlineUntil is a future date, listing auto-restores to online at that time
   // When status === 'offline' and offlineUntil is null, vendor must manually toggle back online
@@ -73,7 +130,13 @@ const businessSchema = new mongoose.Schema({
       serviceName: { type: String, required: true },
       price: { type: String, required: true },
       discount: { type: String }, // optional
-      description: { type: String, required: true }, // short description (max 200 chars)
+      description: { type: String }, // short description (max 200 chars)
+      // For PANDIT service type - category (e.g., 'Ceremonies', 'Homam', 'Poojas')
+      type: { type: String },
+      // For PANDIT service type - specific service (e.g., 'Ganesh Puja', 'Hindu Wedding')
+      subtype: { type: String },
+      // For PANDIT service type - duration in hours
+      hours: { type: Number, min: 0.5 },
       // For FOOD CATERER service types, this caps how many plates a user can order
       maxPlates: { type: Number, min: 1 },
       // For PHOTOGRAPHER listings, optional tiered rates by hours
@@ -94,13 +157,70 @@ const businessSchema = new mongoose.Schema({
       subServices: [
         new mongoose.Schema({
           serviceName: { type: String, required: true },
+          // For Pandit - subtype name (e.g., 'Ganesh Puja', 'Hindu Wedding')
+          subtype: { type: String },
+          // For Pandit - duration in hours
+          hours: { type: Number, min: 0.5 },
           price: { type: String, required: true },
           discount: { type: String },
-          description: { type: String, required: true },
+          description: { type: String },
           maxPlates: { type: Number, min: 1 },
           images: [String],
         }, { _id: true, id: false })
       ],
+      
+      // ========== INVITATION CARD DESIGNER / Card Printing specific fields ==========
+      // Card Specifications
+      numberOfPages: { type: Number, min: 1 },
+      isLaminated: { type: Boolean, default: false },
+      laminationType: { type: String, enum: ['matte', 'glossy', 'soft-touch', 'none'] },
+      
+      // Card Dimensions
+      cardWidth: { type: Number }, // in dimensionUnit
+      cardHeight: { type: Number }, // in dimensionUnit
+      dimensionUnit: { type: String, enum: ['mm', 'inches', 'cm'], default: 'inches' },
+      
+      // Paper Details
+      paperThickness: { type: String }, // e.g., '300 GSM', '350 GSM'
+      paperMaterial: { type: String }, // e.g., 'Art Paper', 'Cardstock', 'Handmade Paper'
+      
+      // Available Colors
+      availableColors: [{ type: String }], // e.g., ['White', 'Ivory', 'Gold', 'Silver']
+      
+      // Bulk Discounts for packs of 100, 200, 500, 1000
+      bulkDiscounts: [
+        new mongoose.Schema({
+          quantity: { type: Number, required: true }, // e.g., 100, 200, 500, 1000
+          discountPercent: { type: Number, min: 0, max: 100 },
+          discountPrice: { type: Number }, // Fixed price per card at this quantity
+        }, { _id: false, id: false })
+      ],
+      
+      // Additional Props/Design
+      additionalPropsDesign: { type: String }, // Text for mentioning extra props/designs
+      
+      // Envelope Details
+      includesEnvelope: { type: Boolean, default: false },
+      envelopeDesign: { type: String },
+      envelopeImages: [{ type: String }],
+      envelopeColor: { type: String },
+      
+      // Wax Seal
+      hasWaxSeal: { type: Boolean, default: false },
+      waxSealColor: { type: String },
+      waxSealDesign: { type: String },
+      waxSealImages: [{ type: String }],
+      waxSealPrice: { type: Number, default: 0 },
+      
+      // Card Type/Category
+      cardType: { 
+        type: String, 
+        enum: ['wedding', 'engagement', 'birthday', 'anniversary', 'baby-shower', 'corporate', 'religious', 'festival', 'other']
+      },
+      
+      // Production Details
+      minimumOrderQuantity: { type: Number, default: 1 },
+      productionTimeInDays: { type: Number, default: 7 },
     }
   ]
   ,
@@ -144,6 +264,41 @@ businessSchema.add({
   previewPhoto: Buffer,
     ownerPhotoUrl: String,
     previewPhotoUrl: String,
+  // Additional legal documents for banquet halls
+  tradeLicense: Buffer,
+  fireSafetyNoc: Buffer,
+  propertyOwnershipProof: Buffer,
+    tradeLicenseUrl: String,
+    fireSafetyNocUrl: String,
+    propertyOwnershipProofUrl: String,
+  // Banquet Hall Photos
+  exteriorPhotos: [{ type: String }], // URLs
+  receptionPhotos: [{ type: String }],
+  roomPhotos: [{ type: String }],
+  bathroomPhotos: [{ type: String }],
+  lobbyPhotos: [{ type: String }],
+  hallPhotos: [{ type: String }],
+  diningAreaPhotos: [{ type: String }],
+  outdoorAreaPhotos: [{ type: String }],
+  parkingPhotos: [{ type: String }],
+  // Cancellation & refund policy agreement
+  cancellationPolicyAgreed: { type: Boolean, default: false },
+  cancellationPolicy: {
+    fullRefundDays: { type: Number, default: 30 },
+    partialRefundDays: { type: Number, default: 15 },
+    partialRefundPercent: { type: Number, default: 50 },
+    noRefundDays: { type: Number, default: 7 },
+  },
+  // Banquet hall pricing
+  pricing: {
+    basePrice: { type: Number },
+    pricingType: { type: String, enum: ['per_day', 'per_plate', 'per_event', 'custom'] },
+    vegPlatePrice: { type: Number },
+    nonVegPlatePrice: { type: Number },
+    roomRentPerNight: { type: Number },
+  },
+  // FSSAI License for in-house catering
+  fssaiLicenseUrl: { type: String },
 });
 
 module.exports = mongoose.model("Business", businessSchema);

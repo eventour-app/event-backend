@@ -43,16 +43,40 @@ function normalizeBusinessDocImages(doc, req) {
   if (!doc || typeof doc !== 'object') return doc;
   const out = { ...doc };
   // Normalize top-level URL fields if present
-  for (const k of ['logoUrl', 'govtIdUrl', 'registrationProofUrl', 'cancelledChequeUrl', 'ownerPhotoUrl', 'previewPhotoUrl']) {
+  for (const k of ['logoUrl', 'govtIdUrl', 'registrationProofUrl', 'cancelledChequeUrl', 'ownerPhotoUrl', 'previewPhotoUrl', 'tradeLicenseUrl', 'fireSafetyNocUrl', 'propertyOwnershipProofUrl', 'fssaiLicenseUrl']) {
     if (out[k]) out[k] = normalizeImageUrl(out[k], req);
   }
-  // Normalize services[].images
+  // Normalize banquet hall photo arrays
+  for (const k of ['exteriorPhotos', 'receptionPhotos', 'roomPhotos', 'bathroomPhotos', 'lobbyPhotos', 'hallPhotos', 'diningAreaPhotos', 'outdoorAreaPhotos', 'parkingPhotos']) {
+    if (Array.isArray(out[k])) {
+      out[k] = out[k].map(v => normalizeImageUrl(v, req));
+    }
+  }
+  // Normalize services[].images and card printing specific image fields
   if (Array.isArray(out.services)) {
     out.services = out.services.map(s => {
       if (!s || typeof s !== 'object') return s;
       const copy = { ...s };
       if (Array.isArray(copy.images)) {
         copy.images = copy.images.map(v => normalizeImageUrl(v, req));
+      }
+      // Card printing specific image fields
+      if (Array.isArray(copy.envelopeImages)) {
+        copy.envelopeImages = copy.envelopeImages.map(v => normalizeImageUrl(v, req));
+      }
+      if (Array.isArray(copy.waxSealImages)) {
+        copy.waxSealImages = copy.waxSealImages.map(v => normalizeImageUrl(v, req));
+      }
+      // Normalize sub-service images
+      if (Array.isArray(copy.subServices)) {
+        copy.subServices = copy.subServices.map(sub => {
+          if (!sub || typeof sub !== 'object') return sub;
+          const subCopy = { ...sub };
+          if (Array.isArray(subCopy.images)) {
+            subCopy.images = subCopy.images.map(v => normalizeImageUrl(v, req));
+          }
+          return subCopy;
+        });
       }
       return copy;
     });
@@ -67,6 +91,8 @@ function normalizeBusinessDocImages(doc, req) {
           if (!s || typeof s !== 'object') return s;
           const sc = { ...s };
           if (Array.isArray(sc.images)) sc.images = sc.images.map(v => normalizeImageUrl(v, req));
+          if (Array.isArray(sc.envelopeImages)) sc.envelopeImages = sc.envelopeImages.map(v => normalizeImageUrl(v, req));
+          if (Array.isArray(sc.waxSealImages)) sc.waxSealImages = sc.waxSealImages.map(v => normalizeImageUrl(v, req));
           return sc;
         });
       }
@@ -316,12 +342,180 @@ router.get('/listings/:id', async (req, res) => {
 });
 
 // GET /api/customer/listings/:id/services - list of services for a listing
+// Returns all services with full details for all service types including card printing
 router.get('/listings/:id/services', async (req, res) => {
   try {
-    const doc = await Business.findById(req.params.id).select({ services: 1 }).lean();
+    const doc = await Business.findById(req.params.id).select({ services: 1, serviceType: 1, businessName: 1 }).lean();
     if (!doc) return res.status(404).json({ message: 'Listing not found' });
-    res.json({ services: doc.services || [] });
+    
+    // Normalize all image URLs and include all fields for all service types
+    const services = (doc.services || []).map(s => {
+      const service = {
+        _id: s._id,
+        serviceName: s.serviceName,
+        price: s.price,
+        discount: s.discount,
+        description: s.description,
+        images: (s.images || []).map(img => normalizeImageUrl(img, req)),
+        serviceLocations: s.serviceLocations || [],
+        hasSubServices: s.hasSubServices || 'no',
+        
+        // Pandit-specific fields
+        type: s.type,
+        subtype: s.subtype,
+        hours: s.hours,
+        
+        // Food Caterer specific
+        maxPlates: s.maxPlates,
+        
+        // Photographer specific - tiered rates
+        rates: s.rates || [],
+        
+        // Invitation Card Designer / Card Printing specific fields
+        numberOfPages: s.numberOfPages,
+        isLaminated: s.isLaminated,
+        laminationType: s.laminationType,
+        cardWidth: s.cardWidth,
+        cardHeight: s.cardHeight,
+        dimensionUnit: s.dimensionUnit,
+        paperThickness: s.paperThickness,
+        paperMaterial: s.paperMaterial,
+        availableColors: s.availableColors || [],
+        bulkDiscounts: s.bulkDiscounts || [],
+        additionalPropsDesign: s.additionalPropsDesign,
+        includesEnvelope: s.includesEnvelope,
+        envelopeDesign: s.envelopeDesign,
+        envelopeImages: (s.envelopeImages || []).map(img => normalizeImageUrl(img, req)),
+        envelopeColor: s.envelopeColor,
+        hasWaxSeal: s.hasWaxSeal,
+        waxSealColor: s.waxSealColor,
+        waxSealDesign: s.waxSealDesign,
+        waxSealImages: (s.waxSealImages || []).map(img => normalizeImageUrl(img, req)),
+        waxSealPrice: s.waxSealPrice,
+        cardType: s.cardType,
+        minimumOrderQuantity: s.minimumOrderQuantity,
+        productionTimeInDays: s.productionTimeInDays,
+        
+        // Sub-services
+        subServices: (s.subServices || []).map(sub => ({
+          _id: sub._id,
+          serviceName: sub.serviceName,
+          subtype: sub.subtype,
+          hours: sub.hours,
+          price: sub.price,
+          discount: sub.discount,
+          description: sub.description,
+          maxPlates: sub.maxPlates,
+          images: (sub.images || []).map(img => normalizeImageUrl(img, req)),
+        })),
+      };
+      
+      // Clean up undefined values for cleaner response
+      Object.keys(service).forEach(key => {
+        if (service[key] === undefined) delete service[key];
+      });
+      
+      return service;
+    });
+    
+    res.json({ 
+      services,
+      total: services.length,
+      serviceType: doc.serviceType,
+      businessName: doc.businessName,
+    });
   } catch (err) {
+    console.error('get listing services error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/customer/listings/:id/services/:serviceId - single service details for a listing
+router.get('/listings/:id/services/:serviceId', async (req, res) => {
+  try {
+    const { id, serviceId } = req.params;
+    const doc = await Business.findById(id).select({ services: 1, serviceType: 1, businessName: 1 }).lean();
+    if (!doc) return res.status(404).json({ message: 'Listing not found' });
+    
+    const s = (doc.services || []).find(svc => String(svc._id) === String(serviceId));
+    if (!s) return res.status(404).json({ message: 'Service not found' });
+    
+    // Build full service object with all fields and normalized images
+    const service = {
+      _id: s._id,
+      serviceName: s.serviceName,
+      price: s.price,
+      discount: s.discount,
+      description: s.description,
+      images: (s.images || []).map(img => normalizeImageUrl(img, req)),
+      serviceLocations: s.serviceLocations || [],
+      hasSubServices: s.hasSubServices || 'no',
+      
+      // Pandit-specific fields
+      type: s.type,
+      subtype: s.subtype,
+      hours: s.hours,
+      
+      // Food Caterer specific
+      maxPlates: s.maxPlates,
+      
+      // Photographer specific - tiered rates
+      rates: s.rates || [],
+      
+      // Invitation Card Designer / Card Printing specific fields
+      numberOfPages: s.numberOfPages,
+      isLaminated: s.isLaminated,
+      laminationType: s.laminationType,
+      cardWidth: s.cardWidth,
+      cardHeight: s.cardHeight,
+      dimensionUnit: s.dimensionUnit,
+      paperThickness: s.paperThickness,
+      paperMaterial: s.paperMaterial,
+      availableColors: s.availableColors || [],
+      bulkDiscounts: s.bulkDiscounts || [],
+      additionalPropsDesign: s.additionalPropsDesign,
+      includesEnvelope: s.includesEnvelope,
+      envelopeDesign: s.envelopeDesign,
+      envelopeImages: (s.envelopeImages || []).map(img => normalizeImageUrl(img, req)),
+      envelopeColor: s.envelopeColor,
+      hasWaxSeal: s.hasWaxSeal,
+      waxSealColor: s.waxSealColor,
+      waxSealDesign: s.waxSealDesign,
+      waxSealImages: (s.waxSealImages || []).map(img => normalizeImageUrl(img, req)),
+      waxSealPrice: s.waxSealPrice,
+      cardType: s.cardType,
+      minimumOrderQuantity: s.minimumOrderQuantity,
+      productionTimeInDays: s.productionTimeInDays,
+      
+      // Sub-services
+      subServices: (s.subServices || []).map(sub => ({
+        _id: sub._id,
+        serviceName: sub.serviceName,
+        subtype: sub.subtype,
+        hours: sub.hours,
+        price: sub.price,
+        discount: sub.discount,
+        description: sub.description,
+        maxPlates: sub.maxPlates,
+        images: (sub.images || []).map(img => normalizeImageUrl(img, req)),
+      })),
+    };
+    
+    // Clean up undefined values
+    Object.keys(service).forEach(key => {
+      if (service[key] === undefined) delete service[key];
+    });
+    
+    res.json({ 
+      service,
+      business: {
+        _id: doc._id,
+        businessName: doc.businessName,
+        serviceType: doc.serviceType,
+      }
+    });
+  } catch (err) {
+    console.error('get listing service error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -345,6 +539,11 @@ function mapOrder(o) {
     location: o.location || o.venue || null,
     venue: o.venue || o.location || null,
     notes: o.notes || null,
+    // Cancellation details
+    cancellationReason: o.cancellationReason || null,
+    cancellationNote: o.cancellationNote || null,
+    cancelledBy: o.cancelledBy || null,
+    cancelledAt: o.cancelledAt || null,
   };
 }
 
@@ -472,6 +671,7 @@ router.get('/orders/:orderId', async (req, res) => {
 });
 
 // PUT /api/customer/orders/:orderId/cancel - customer cancels pending/accepted
+// Body: { reason?: string, note?: string }
 router.put('/orders/:orderId/cancel', async (req, res) => {
   try {
     const auth = req.headers.authorization || '';
@@ -490,8 +690,26 @@ router.put('/orders/:orderId/cancel', async (req, res) => {
     if (!['pending','accepted','upcoming'].includes(order.status)) {
       return res.status(400).json({ message: 'Only pending/accepted/upcoming orders can be cancelled' });
     }
+    
+    // Get cancellation reason from body
+    const { reason, note } = req.body || {};
+    
     order.status = 'cancelled';
-    order.messages.push({ senderRole: 'customer', body: 'Order cancelled by customer' });
+    
+    // Store cancellation reason if provided
+    if (reason) {
+      order.cancellationReason = reason;
+      order.cancellationNote = note || null;
+      order.cancelledBy = 'customer';
+      order.cancelledAt = new Date();
+      const reasonText = note ? `${reason}: ${note}` : reason;
+      order.messages.push({ senderRole: 'customer', body: `Order cancelled by customer. Reason: ${reasonText}` });
+    } else {
+      order.cancelledBy = 'customer';
+      order.cancelledAt = new Date();
+      order.messages.push({ senderRole: 'customer', body: 'Order cancelled by customer' });
+    }
+    
     await order.save();
     // Mark any pending booking transaction as failed/cancelled
     await Transaction.updateMany({ orderId: order._id, type: 'booking', status: { $in: ['pending','processing'] } }, { $set: { status: 'failed' } });

@@ -22,6 +22,12 @@ const orderSchema = new mongoose.Schema({
   venue: { type: String },      // synonym
   notes: { type: String },
 
+  // Cancellation/Decline reason tracking
+  cancellationReason: { type: String },      // The selected reason
+  cancellationNote: { type: String },        // Custom note if "Other" is selected
+  cancelledBy: { type: String, enum: ['vendor', 'customer', 'system'] }, // Who cancelled
+  cancelledAt: { type: Date },               // When cancelled
+
   messages: [
     {
       senderRole: { type: String, enum: ['vendor','customer','system'], default: 'system' },

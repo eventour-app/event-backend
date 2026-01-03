@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 const Otp = require('../models/Otp');
 const { normalizePhone } = require('../utils/phone');
-const twilioVerify = require('../utils/twilio');
+const firebasePhone = require('../utils/firebasePhone');
 
 const router = express.Router();
 
@@ -99,17 +99,25 @@ router.post('/send-otp', async (req, res) => {
 
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 min
 
-    // Use Twilio Verify for SMS OTP
-    if (!twilioVerify.isConfigured()) {
-      return res.status(500).json({ message: 'Twilio Verify is not configured (set TWILIO_* env vars)' });
+    // Use Firebase Phone Auth for SMS OTP
+    if (!firebasePhone.isConfigured()) {
+      return res.status(500).json({ message: 'Firebase Phone Auth is not configured (set FIREBASE_API_KEY env var)' });
     }
     try {
-      const resp = await twilioVerify.sendVerification(norm, 'sms');
-      await Otp.create({ identifier: norm, role: 'vendor', provider: 'twilio', channel: 'sms', expiresAt, lastSentAt: new Date() });
-      return res.json({ message: 'OTP sent', provider: 'twilio', sid: resp.sid });
+      const resp = await firebasePhone.startPhoneVerification(norm);
+      await Otp.create({ 
+        identifier: norm, 
+        role: 'vendor', 
+        provider: 'firebase', 
+        channel: 'sms', 
+        firebaseSessionInfo: resp.sessionInfo,
+        expiresAt, 
+        lastSentAt: new Date() 
+      });
+      return res.json({ message: 'OTP sent', provider: 'firebase' });
     } catch (e) {
       const msg = (e && e.message) || 'Failed to send OTP';
-      console.error('Twilio send OTP failed:', msg);
+      console.error('Firebase send OTP failed:', msg);
       return res.status(500).json({ message: 'Failed to send OTP', error: msg });
     }
   } catch (err) {
@@ -128,14 +136,14 @@ router.post('/verify-otp', async (req, res) => {
     const record = await Otp.findOne({ identifier: norm, role: 'vendor' }).sort({ createdAt: -1 });
     if (!record) return res.status(400).json({ message: 'OTP not found. Please request a new one.' });
     if (record.expiresAt < new Date()) return res.status(400).json({ message: 'OTP expired' });
-    if (record.provider !== 'twilio') {
-      return res.status(400).json({ message: 'Unsupported OTP provider (expected twilio)' });
+    if (record.provider !== 'firebase') {
+      return res.status(400).json({ message: 'Unsupported OTP provider (expected firebase)' });
+    }
+    if (!record.firebaseSessionInfo) {
+      return res.status(400).json({ message: 'Session info missing. Please request a new OTP.' });
     }
     try {
-      const resp = await twilioVerify.checkVerification(norm, String(code));
-      if (resp.status !== 'approved') {
-        return res.status(400).json({ message: 'Invalid OTP' });
-      }
+      await firebasePhone.verifyPhoneCode(record.firebaseSessionInfo, String(code));
     } catch (e) {
       return res.status(400).json({ message: 'Invalid OTP' });
     }

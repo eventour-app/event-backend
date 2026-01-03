@@ -21,6 +21,11 @@ function mapOrder(o) {
     location: o.location || o.venue || null,
     venue: o.venue || o.location || null,
     notes: o.notes || null,
+    // Cancellation details
+    cancellationReason: o.cancellationReason || null,
+    cancellationNote: o.cancellationNote || null,
+    cancelledBy: o.cancelledBy || null,
+    cancelledAt: o.cancelledAt || null,
   };
 }
 
@@ -78,7 +83,7 @@ router.get('/:orderId', async (req, res) => {
   }
 });
 
-async function updateOrderStatus(req, res, status) {
+async function updateOrderStatus(req, res, status, options = {}) {
   try {
     const { orderId } = req.params;
     const allowed = ['accepted','declined','completed','cancelled','in_progress','on_the_way'];
@@ -99,6 +104,22 @@ async function updateOrderStatus(req, res, status) {
     const order = await Order.findById(orderId);
     if (!order) return err(res, 404, 'Order not found', 'NOT_FOUND');
     order.status = status;
+    
+    // Handle cancellation/decline reason
+    const { reason, note } = options;
+    if ((status === 'cancelled' || status === 'declined') && reason) {
+      order.cancellationReason = reason;
+      order.cancellationNote = note || null;
+      order.cancelledBy = 'vendor';
+      order.cancelledAt = new Date();
+      // Add message for tracking
+      const reasonText = note ? `${reason}: ${note}` : reason;
+      order.messages.push({ 
+        senderRole: 'vendor', 
+        body: `Order ${status} by vendor. Reason: ${reasonText}` 
+      });
+    }
+    
     await order.save();
     const txStatusMap = {
       accepted: 'processing',
@@ -160,7 +181,18 @@ router.post('/:orderId/accept', async (req, res) => updateOrderStatus(req, res, 
 router.post('/:orderId/complete', async (req, res) => updateOrderStatus(req, res, 'completed'));
 
 // POST /api/orders/:orderId/cancel -> status=cancelled
-router.post('/:orderId/cancel', async (req, res) => updateOrderStatus(req, res, 'cancelled'));
+// Body: { reason?: string, note?: string }
+router.post('/:orderId/cancel', async (req, res) => {
+  const { reason, note } = req.body || {};
+  return updateOrderStatus(req, res, 'cancelled', { reason, note });
+});
+
+// POST /api/orders/:orderId/decline -> status=declined
+// Body: { reason?: string, note?: string }
+router.post('/:orderId/decline', async (req, res) => {
+  const { reason, note } = req.body || {};
+  return updateOrderStatus(req, res, 'declined', { reason, note });
+});
 
 // POST /api/orders/:orderId/in-progress -> status=in_progress
 router.post('/:orderId/in-progress', async (req, res) => updateOrderStatus(req, res, 'in_progress'));
